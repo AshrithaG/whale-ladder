@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoharness-textarena-shim"
+version = "0.1.0"
+description = "Minimal stand-in for the autoharness_textarena client imported by WHALE's chess domain"
+requires-python = ">=3.10"
+dependencies = ["openai>=1.40"]
+
+[tool.setuptools]
+packages = ["autoharness_textarena"]
