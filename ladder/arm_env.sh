@@ -38,14 +38,38 @@ base=$(( 20000 + ( ${SLURM_JOB_ID:-$$} % 2000 ) * 10 ))
 export SOLVER_PORT=$(( base + 1 )) PROPOSER_PORT=$(( base + 2 )) LITELLM_PORT=$(( base + 3 ))
 export LADDER_SOLVER_KEY="EMPTY"
 
+# The GPUs Slurm gave this job, captured once before anything narrows
+# CUDA_VISIBLE_DEVICES. lib.sh maps the rung's job-relative indices onto these.
+export LADDER_JOB_GPUS="${LADDER_JOB_GPUS:-${CUDA_VISIBLE_DEVICES:-}}"
+# A private Ray temp dir per job: two jobs on one node then never share a Ray
+# cluster, and this job's Ray processes can be found and stopped without
+# touching the other's. Kept short and node-local (Ray's socket paths have a
+# ~107 character limit, which $PROJECT paths can exceed).
+export RAY_TMPDIR="/tmp/ray-${USER:-u}-${SLURM_JOB_ID:-$$}"
+mkdir -p "$RAY_TMPDIR"
+
 # ---- WHALE chess domain, as in domains/chess_puzzles/run/whale.sh ---------
 export DOMAIN_DIR="$WHALE_DIR/domains/chess_puzzles"
 export PYTHONPATH="$DOMAIN_DIR:${PYTHONPATH:-}"
 export TRAIN_SCRIPT="$DOMAIN_DIR/scripts/train_chess_puzzle_multinode_disagg.sh"
 export MH_MODULE="meta_harness.meta_harness_chess_puzzle"
 export BASE_HARNESS="$DOMAIN_DIR/environments/chess_puzzle/base_harness.py"
-export BASE_MODEL="$SOLVER_MODEL"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1   # weights are pre-downloaded by setup
+
+# model_path REPO REVISION : local directory of that exact downloaded commit.
+# Training and serving load from this path, so the pinned revision is what
+# runs even if the Hub repo has moved on. Falls back to the repo id (with a
+# warning) only where the snapshot is missing, e.g. during cleanup on a
+# machine without the weights; preflight fails in that case before any run.
+model_path() {
+  python - "$1" "$2" 2>/dev/null <<'PY' || { ladder_log "WARN: no local snapshot of $1@${2:0:7}; using the repo id"; echo "$1"; }
+import sys
+from huggingface_hub import snapshot_download
+print(snapshot_download(sys.argv[1], revision=sys.argv[2], local_files_only=True))
+PY
+}
+export SOLVER_MODEL_PATH="$(model_path "$SOLVER_MODEL" "$SOLVER_MODEL_REVISION")"
+export BASE_MODEL="$SOLVER_MODEL_PATH"
 
 # ---- proposer rung ----------------------------------------------------------
 export LADDER_RUNG="${ARM#whale_}"
@@ -65,11 +89,11 @@ case "$ARM" in
     fi ;;
   whale_qwen27b)
     PROPOSER_BACKEND=local
-    export PROPOSER_MODEL_PATH="$QWEN27B_MODEL" PROPOSER_TP=2
+    export PROPOSER_MODEL_PATH="$(model_path "$QWEN27B_MODEL" "$QWEN27B_REVISION")" PROPOSER_TP=2
     export SOLVER_GPUS=0,1 SOLVER_DP=2 PROPOSER_GPUS=2,3 ;;
   whale_qwen4b)
     PROPOSER_BACKEND=local
-    export PROPOSER_MODEL_PATH="$SOLVER_MODEL" PROPOSER_TP=1
+    export PROPOSER_MODEL_PATH="$SOLVER_MODEL_PATH" PROPOSER_TP=1
     export SOLVER_GPUS=0,1,2 SOLVER_DP=3 PROPOSER_GPUS=3 ;;
   whale_self)
     PROPOSER_BACKEND=local

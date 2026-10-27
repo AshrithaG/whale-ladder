@@ -68,18 +68,48 @@ stop_servers() {
   rm -f "$f"
 }
 
-# Block until every visible GPU uses less than 2 GiB, so the next phase does not
-# start while the previous one's processes are still releasing memory.
+# job_gpus REL_IDS : turn job-relative GPU indices ("0,1" = this job's first two
+# GPUs) into the ids Slurm actually gave the job. On a GPU-shared node where
+# other jobs' GPUs are visible, CUDA_VISIBLE_DEVICES holds the real ids, and
+# "0,1" taken literally could land on someone else's GPUs.
+job_gpus() {
+  local rel="$1" job="${LADDER_JOB_GPUS:-}"
+  [[ -n "$job" ]] || { echo "$rel"; return; }
+  local -a ids rels out=()
+  IFS=',' read -r -a ids <<< "$job"
+  IFS=',' read -r -a rels <<< "$rel"
+  for i in "${rels[@]}"; do
+    (( i < ${#ids[@]} )) || { ladder_log "ERROR: GPU index $i but the job has ${#ids[@]} GPUs ($job)"; return 1; }
+    out+=("${ids[$i]}")
+  done
+  (IFS=','; echo "${out[*]}")
+}
+
+# Block until this job's GPUs each use less than 2 GiB, so the next phase does
+# not start while the previous one's processes are still releasing memory.
+# Only this job's GPUs are checked; other jobs on the node are left alone.
 wait_gpus_free() {
   local timeout="${1:-300}" waited=0 used
+  local -a sel=()
+  [[ -n "${LADDER_JOB_GPUS:-}" ]] && sel=(-i "$LADDER_JOB_GPUS")
   while (( waited < timeout )); do
-    used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | sort -n | tail -1)"
+    used="$(nvidia-smi "${sel[@]}" --query-gpu=memory.used --format=csv,noheader,nounits | sort -n | tail -1)"
     if (( ${used:-0} < 2048 )); then return 0; fi
     sleep 5; waited=$(( waited + 5 ))
   done
-  ladder_log "WARN: GPUs still hold ${used} MiB after ${timeout}s; stopping stray Ray processes"
-  ray stop --force >/dev/null 2>&1 || true
+  ladder_log "WARN: this job's GPUs still hold ${used} MiB after ${timeout}s; stopping this job's Ray processes"
+  stop_job_ray
   sleep 10
+}
+
+# Kill only the Ray processes of this job: they all carry this job's private
+# Ray temp dir (RAY_TMPDIR, set in arm_env.sh) on their command line. Never
+# `ray stop`, which would also kill the user's other jobs on the same node.
+stop_job_ray() {
+  [[ -n "${RAY_TMPDIR:-}" ]] || return 0
+  pkill -TERM -f -- "$RAY_TMPDIR" 2>/dev/null || true
+  sleep 5
+  pkill -KILL -f -- "$RAY_TMPDIR" 2>/dev/null || true
 }
 
 # merge_ckpt CKPT_DIR : verl saves sharded FSDP actor weights; vLLM needs a plain
@@ -102,8 +132,10 @@ merge_ckpt() {
 }
 
 # start_vllm NAME MODEL SERVED_NAME GPUS PORT MAX_LEN TP DP [extra vllm args...]
+# GPUS are job-relative indices, e.g. 2,3 = this job's third and fourth GPU.
 start_vllm() {
   local name="$1" model="$2" served="$3" gpus="$4" port="$5" max_len="$6" tp="$7" dp="$8"; shift 8
+  gpus="$(job_gpus "$gpus")" || return 1
   start_bg "$name" "$RUN_OUT/logs/${name}_vllm.log" \
     env CUDA_VISIBLE_DEVICES="$gpus" vllm serve "$model" \
       --served-model-name "$served" \

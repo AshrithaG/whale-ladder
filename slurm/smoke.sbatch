@@ -28,8 +28,8 @@ child=""
 cleanup() {
   echo "== stopping (signal) =="
   [[ -n "$child" ]] && kill -TERM -- "-$child" 2>/dev/null
-  ( export ARM PROFILE; source ladder/arm_env.sh; bash ladder/hooks/post_harness.sh 0 0 ) || true
-  ray stop --force >/dev/null 2>&1 || true
+  # Only this job's servers and Ray processes; other jobs on the node are untouched.
+  ( export ARM PROFILE; source ladder/arm_env.sh; bash ladder/hooks/post_harness.sh 0 0; stop_job_ray ) || true
 }
 trap cleanup USR1 TERM INT
 

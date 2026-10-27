@@ -67,9 +67,32 @@ sbatch -A <account> slurm/smoke.sbatch whale_deepseek
 sbatch -A <account> slurm/smoke.sbatch whale_self
 ```
 
-Start with `whale_deepseek` (fewest local servers), then `whale_self`, which
-exercises the local proposer path and the trained-checkpoint handoff. Do
-`whale_qwen27b` once those two pass.
+Start with `whale_self`: it needs no internet or API key, and it exercises the
+local proposer path and the trained-checkpoint handoff. Then run
+`whale_deepseek` (after preflight confirms compute nodes have internet) and
+`whale_qwen27b`.
+
+## Running the arms across several people
+
+Each arm is an independent run, so arms can go on different people's
+allocations. The split we use:
+
+| Person | Arms | Install |
+|---|---|---|
+| A | `whale_qwen27b` | full install (needs the 27B) |
+| B | `whale_qwen4b`, `whale_self` | `SKIP_27B=1 bash setup/install.sh` |
+| C | `whale_deepseek`, `rsft_only` | `SKIP_27B=1 bash setup/install.sh`, own API key |
+
+For the arms to be comparable, everyone must run identical inputs:
+
+1. **Same code:** the same commit of this repo, with no local edits to `ladder/profiles/`.
+2. **Same weights:** `config.env` pins both models to exact Hugging Face revisions; nothing to do.
+3. **Same puzzles:** the install builds them from a Lichess dataset that changes over time. So **B installs first**. B's install prints a data fingerprint; B puts it in `CHESS_DATA_FINGERPRINT` in `ladder/config.env`, pushes, and sends the three `.parquet` files to A and C. A and C set `CHESS_DATA_FROM` to the folder holding those files before running install. From then on, preflight refuses to run on different data.
+4. **Same GPUs:** H100-80GB for everyone.
+
+**Order:** B runs the `whale_self` smoke test first and alone: it needs no internet or API key and exercises the most code. A and C start once it passes.
+
+Two jobs from one person may be submitted at the same time, even if Slurm puts them on the same node. Each job uses only its own GPUs, its own ports and its own Ray instance, and stops only its own processes.
 
 ## What to send back
 

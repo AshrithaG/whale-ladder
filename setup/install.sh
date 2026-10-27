@@ -73,22 +73,41 @@ fi
 say "claude $("$VENV/bin/claude" --version 2>/dev/null || echo 'version unknown')"
 
 # ---- 4. Model weights -------------------------------------------------------
-hf_get() { if command -v hf >/dev/null; then hf download "$1"; else huggingface-cli download "$1"; fi > /dev/null; }
-say "downloading $SOLVER_MODEL"
-hf_get "$SOLVER_MODEL"
+# hf_get REPO REVISION : download one exact commit of a model.
+hf_get() {
+  if command -v hf >/dev/null; then hf download "$1" --revision "$2"
+  else huggingface-cli download "$1" --revision "$2"; fi > /dev/null
+}
+say "downloading $SOLVER_MODEL @ ${SOLVER_MODEL_REVISION:0:7}"
+hf_get "$SOLVER_MODEL" "$SOLVER_MODEL_REVISION"
 if [[ "${SKIP_27B:-0}" != 1 ]]; then
-  say "downloading $QWEN27B_MODEL (large)"
-  hf_get "$QWEN27B_MODEL"
+  say "downloading $QWEN27B_MODEL @ ${QWEN27B_REVISION:0:7} (large)"
+  hf_get "$QWEN27B_MODEL" "$QWEN27B_REVISION"
 fi
 
 # ---- 5. Chess puzzle data (D_weight 16,384 / D_harness 256 / D_test 256) ----
 data="$WHALE_DIR/domains/chess_puzzles/data/chess_puzzle"
 if [[ -f "$data/lichess_puzzles_test_256.parquet" ]]; then
-  say "chess data already prepared"
+  say "chess data already in place"
+elif [[ -n "${CHESS_DATA_FROM:-}" ]]; then
+  say "copying the shared chess data from $CHESS_DATA_FROM"
+  mkdir -p "$data"
+  cp "$CHESS_DATA_FROM"/lichess_puzzles_{train_16384,mh_val_256,test_256}.parquet "$data"/
 else
   say "preparing chess data from Lichess/chess-puzzles (the Hub dataset is not pinned; date recorded)"
   ( cd "$WHALE_DIR/domains/chess_puzzles" && python scripts/prepare_chess_puzzle_data.py )
   date -u +%FT%TZ > "$data/PREPARED_AT"
+fi
+python "$LADDER_HOME/tools/data_fingerprint.py" "$data" | tee "$data/SHA256SUMS"
+fp="$(tail -1 "$data/SHA256SUMS")"
+if [[ -z "${CHESS_DATA_FINGERPRINT:-}" ]]; then
+  say "chess data fingerprint: $fp"
+  say "If other people run arms, set CHESS_DATA_FINGERPRINT=\"$fp\" in ladder/config.env, push it, and send them the three .parquet files in $data"
+elif [[ "$fp" != "$CHESS_DATA_FINGERPRINT" ]]; then
+  say "ERROR: chess data fingerprint $fp does not match CHESS_DATA_FINGERPRINT=$CHESS_DATA_FINGERPRINT"
+  exit 1
+else
+  say "chess data matches the shared fingerprint $fp"
 fi
 
 say "done. Next: bash setup/preflight.sh (on a GPU node) or sbatch slurm/proposer_check.sbatch"

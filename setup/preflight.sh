@@ -24,7 +24,9 @@ source "$VENV/bin/activate" 2>/dev/null || { echo "FAIL  venv missing at $VENV; 
 DOMAIN_DIR="$WHALE_DIR/domains/chess_puzzles"
 export PYTHONPATH="$DOMAIN_DIR"
 
-check "4 GPUs visible" bash -c '[[ $(nvidia-smi -L | wc -l) -ge 4 ]] && nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1'
+# Count the job's own GPUs (CUDA_VISIBLE_DEVICES under Slurm), not every GPU
+# nvidia-smi can see on a shared node.
+check "job has 4 GPUs" bash -c 'n=$(if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then tr "," "\n" <<< "$CUDA_VISIBLE_DEVICES" | wc -l; else nvidia-smi -L | wc -l; fi); [[ $n -ge 4 ]] && echo "$n GPUs (${CUDA_VISIBLE_DEVICES:-all}), $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"'
 check "WHALE patch applied" grep -q PRE_HARNESS_HOOK "$WHALE_DIR/run/lib/alternate.sh"
 check "torch sees CUDA" python -c 'import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count())'
 check "vllm >= 0.17" python -c 'import vllm; from packaging.version import Version as V; assert V(vllm.__version__) >= V("0.17"), vllm.__version__; print(vllm.__version__)'
@@ -36,9 +38,18 @@ check "claude CLI" "$VENV/bin/claude" --version
 for f in lichess_puzzles_train_16384 lichess_puzzles_mh_val_256 lichess_puzzles_test_256; do
   check "data $f" test -f "$DOMAIN_DIR/data/chess_puzzle/$f.parquet"
 done
-check "solver weights cached" python -c "from huggingface_hub import snapshot_download as s; print(s('$SOLVER_MODEL', local_files_only=True))"
+# Everyone running an arm must have identical puzzles; compare this fingerprint.
+data_fp() {
+  local fp; fp="$(python "$LADDER_HOME/tools/data_fingerprint.py" "$DOMAIN_DIR/data/chess_puzzle" | tail -1)" || return 1
+  if [[ -n "$CHESS_DATA_FINGERPRINT" && "$fp" != "$CHESS_DATA_FINGERPRINT" ]]; then
+    echo "$fp, expected $CHESS_DATA_FINGERPRINT"; return 1
+  fi
+  echo "$fp"
+}
+check "chess data fingerprint" data_fp
+check "solver weights @ ${SOLVER_MODEL_REVISION:0:7}" python -c "from huggingface_hub import snapshot_download as s; print(s('$SOLVER_MODEL', revision='$SOLVER_MODEL_REVISION', local_files_only=True))"
 if [[ "$ARM" == whale_qwen27b ]]; then
-  check "27B weights cached" python -c "from huggingface_hub import snapshot_download as s; print(s('$QWEN27B_MODEL', local_files_only=True))"
+  check "27B weights @ ${QWEN27B_REVISION:0:7}" python -c "from huggingface_hub import snapshot_download as s; print(s('$QWEN27B_MODEL', revision='$QWEN27B_REVISION', local_files_only=True))"
 fi
 if [[ "$ARM" == whale_deepseek ]]; then
   check "price set for the dollar cap" bash -c "[[ '$DEEPSEEK_PRICE_IN_PER_M' != 0 && '$DEEPSEEK_PRICE_OUT_PER_M' != 0 ]]"

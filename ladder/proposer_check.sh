@@ -17,7 +17,7 @@ trap 'stop_servers' EXIT
 
 if [[ "$PROPOSER_BACKEND" == local ]]; then
   model="$PROPOSER_MODEL_PATH"
-  [[ "$model" == "@checkpoint" ]] && model="$SOLVER_MODEL"
+  [[ "$model" == "@checkpoint" ]] && model="$SOLVER_MODEL_PATH"
   # In the real run the proposer gets only its own GPUs; here it may use the
   # same number of GPUs, starting from GPU 0.
   gpus="$(seq -s, 0 $(( PROPOSER_TP - 1 )))"
