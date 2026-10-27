@@ -5,7 +5,9 @@ Changes from domains/chess_puzzles/meta_harness/config-chess-puzzle.json:
     so two jobs on one shared node cannot collide;
   - the proposer is the rung's model behind LiteLLM ("ladder-proposer");
   - proposer_effort is null, so no Anthropic-only --effort flag is sent;
-  - proposals_per_iter comes from the profile.
+  - proposals_per_iter comes from the profile;
+  - LADDER_MH_LIMIT, if set (the tiny profile), scores candidates on only that
+    many of the 256 harness-search puzzles.
 Everything else (puzzles, sampling, turn limits, metric) is left as released.
 
 Usage: python make_mh_config.py SOURCE_JSON OUT_JSON
@@ -27,6 +29,12 @@ def main() -> None:
     meta["proposer_effort"] = None
     meta["proposals_per_iter"] = int(os.environ.get("PROPOSALS_PER_ITER", meta.get("proposals_per_iter", 3)))
     meta["propose_timeout_s"] = int(os.environ.get("PROPOSER_TIMEOUT", meta.get("propose_timeout_s", 2400)))
+    limit = os.environ.get("LADDER_MH_LIMIT", "").strip()
+    if limit:
+        # chess_puzzle_benchmark reads each task profile's limit first, then eval.limit.
+        for profile in config.get("task_profiles", {}).values():
+            profile["limit"] = int(limit)
+        config.setdefault("eval", {})["limit"] = int(limit)
     for model in config.get("models", []):
         model["api_base"] = f"http://127.0.0.1:{os.environ['SOLVER_PORT']}/v1"
         model["model"] = os.environ["SOLVER_SERVED_NAME"]

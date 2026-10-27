@@ -46,6 +46,32 @@ on 2, proposer on 2; `qwen4b` and `self` solver on 3, proposer on 1.
 4. Know your account: every `sbatch` below takes `-A <account>`. Check the
    balance with `projects`.
 
+## The pipeline: three stages
+
+| Stage | How | Size | Answers |
+|---|---|---|---|
+| 1. Tiny test | interactive, 1 hour | 1 training step on 16 puzzles, 1 proposal, scoring on 32 puzzles | does every stage run end to end? |
+| 2. Smoke test | `sbatch`, up to 8 h; one arm is enough | real sizes, one cycle | what does a real cycle cost (GPU hours, dollars)? |
+| 3. Real runs | `sbatch`, all arms, split across people | sized from stage 2 | the results |
+
+Move to the next stage only when the current one passes. Stage 1 catches
+crashes in minutes. Its timings are mostly startup and do not predict real
+costs, which is why stage 2 exists.
+
+**Stage 1, interactive:**
+
+```bash
+tmux new -s ladder                        # on the login node; survives a dropped connection
+srun -A <account> -p GPU-shared --gpus=h100-80:4 -t 01:00:00 --pty bash
+cd $PROJECT/whale-ladder
+bash ladder/interactive_test.sh whale_self
+```
+
+It takes about 30-45 minutes and ends with a PASS/FAIL line per stage. It
+starts fresh each time, so rerunning after a fix is safe. Then, still in the
+same session if time remains, check the API rung:
+`bash ladder/proposer_check.sh whale_deepseek`.
+
 ## Steps
 
 ```bash
@@ -57,12 +83,13 @@ vi ladder/config.env    # FIREWORKS_DEEPSEEK_MODEL and DEEPSEEK_PRICE_* for the 
 # 2. Install (login node, no GPU, about 1-2 h, about 90 GB with the 27B)
 bash setup/install.sh
 
-# 3. Check each proposer rung (about 10-30 min each)
+# 3. Stage 1: the interactive tiny test above. Then check each proposer rung
+#    (about 10-30 min each; can also run inside the interactive session)
 sbatch -A <account> slurm/proposer_check.sbatch whale_qwen4b
 sbatch -A <account> slurm/proposer_check.sbatch whale_qwen27b
 sbatch -A <account> slurm/proposer_check.sbatch whale_deepseek
 
-# 4. Smoke test, one arm at a time (up to 8 h each)
+# 4. Stage 2: smoke test (up to 8 h); one arm is enough to size the real runs
 sbatch -A <account> slurm/smoke.sbatch whale_deepseek
 sbatch -A <account> slurm/smoke.sbatch whale_self
 ```
