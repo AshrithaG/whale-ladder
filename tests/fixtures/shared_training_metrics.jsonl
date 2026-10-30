@@ -1,0 +1,2 @@
+{"step": 1, "data": {"online_rsft/accepted": 90, "online_rsft/total": 2048, "actor/sft_updates": 2.0, "val-core/chess-puzzle-v0/acc/mean@2": 0.0, "timing_s/update_weights": 4.314072331879288}}
+{"step": 2, "data": {"online_rsft/accepted": 75, "online_rsft/total": 2048, "actor/sft_updates": 2.0, "val-core/chess-puzzle-v0/acc/mean@2": 0.03125, "timing_s/update_weights": 4.597884761868045}}

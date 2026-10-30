@@ -33,7 +33,7 @@ fi
 
 # Restore missing files from this same pinned release, then apply runtime fixes.
 python3 "$LADDER_HOME/setup/repair_chess_release.py" "$WHALE_DIR"
-for compat_patch in vllm-routed-experts vllm-streamed-tied-weights torch-padding-fallback vllm-pause-generation; do
+for compat_patch in vllm-routed-experts vllm-streamed-tied-weights torch-padding-fallback vllm-pause-generation shared-fsdp2; do
   patch="$LADDER_HOME/patches/$compat_patch.patch"
   if ! git -C "$WHALE_DIR" apply --check -R "$patch" 2>/dev/null; then
     git -C "$WHALE_DIR" apply "$patch"

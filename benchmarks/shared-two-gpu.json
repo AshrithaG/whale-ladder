@@ -1,0 +1,54 @@
+{
+  "kind": "historical development measurements, not a GPU run of the extracted branch",
+  "hardware": "2 x H100 80GB, 24 CPU cores, 256 GiB host memory",
+  "worker_comparison": {
+    "job_id": 50015424,
+    "source": "generation-rate-comparison.json",
+    "puzzles": 256,
+    "attempts_per_puzzle": 8,
+    "rollouts": 2048,
+    "checkpoint": "same memory75-smoke global_step_2",
+    "gpu_memory_utilization": 0.75,
+    "backend": "triton",
+    "generation_and_output_processing_s": {
+      "workers4": 1342.768,
+      "workers8": 1064.366
+    },
+    "assistant_tokens": {
+      "workers4": 16618192,
+      "workers8": 16608315
+    },
+    "max_preemptions": 0
+  },
+  "training_example": {
+    "job_id": 50015424,
+    "source": "end-to-end/summary.json training_metrics",
+    "training_rollouts": 2048,
+    "generation_s": 1056.8496341290884,
+    "accepted_samples": 82,
+    "global_sft_minibatch": 64,
+    "optimizer_updates": 2,
+    "update_s": 292.86962646991014
+  },
+  "cuda_graph_comparison": {
+    "job_id": 50009762,
+    "source": "attempt-3/benchmarks/results.json eager and graphs",
+    "puzzles": 64,
+    "attempts_per_puzzle": 2,
+    "rollout_gpus": 1,
+    "generation_s": {
+      "eager": 389.35484558995813,
+      "graphs": 164.3962527383119
+    },
+    "including_startup_s": {
+      "eager": 671.5119654275477,
+      "graphs": 523.0706658763811
+    }
+  },
+  "limitations": [
+    "Historical evidence; clean extraction GPU run still required.",
+    "First shared test in job 50009762 used 64 SFT samples per GPU; not an equal global-batch training comparison.",
+    "No completed matched 60%-versus-75% memory comparison.",
+    "Throughput is not evidence of research quality."
+  ]
+}
