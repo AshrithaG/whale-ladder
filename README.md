@@ -80,7 +80,9 @@ cd $PROJECT && git clone <this repo> whale-ladder && cd whale-ladder
 cp ladder/secrets.env.example ladder/secrets.env     # add your keys
 vi ladder/config.env    # FIREWORKS_DEEPSEEK_MODEL and DEEPSEEK_PRICE_* for the DeepSeek rung
 
-# 2. Install (login node, no GPU, about 1-2 h, about 90 GB with the 27B)
+# 2. Install on a compute allocation with internet access.
+#    On PSC, select the compiler module before installation and future launches:
+export LADDER_GCC_MODULE=gcc/13.3.1-p20240614
 bash setup/install.sh
 
 # 3. Stage 1: the interactive tiny test above. Then check each proposer rung
@@ -181,7 +183,46 @@ Also note:
 
 ## Troubleshooting
 
-- **Trainer out of memory (4B full fine-tune on 2 GPUs):** add `FSDP_OPTIM_OFFLOAD=True` to the profile.
+### PSC runtime compatibility
+
+Setup restores the missing chess `verl.tools` package from the Math domain in
+the same pinned WHALE checkout, and restores `data/legacy_data.yaml` from that
+release's generated trainer configuration. Conflicting local files are rejected.
+Four runtime patches adapt vLLM expert imports, streamed tied-weight validation,
+and the generation-pause API, and provide existing PyTorch padding helpers when
+FlashAttention is absent. Padding fallback does not supply attention kernels.
+
+The NCCL weight-transfer path needs CuPy matching PyTorch's CUDA runtime. Its
+installer constrains installed packages while adding the missing dependency.
+The kernel installer obtains matching precompiled kernels through vLLM's helper.
+`ladder/config.env` selects Conda's C++ runtime and optionally loads the PSC GCC
+module specified by `LADDER_GCC_MODULE`; persist that setting in your job environment
+or site configuration so subsequent launches use the same compiler.
+
+On the allocated GPU node, run `bash setup/preflight.sh whale_self tiny` before
+the tiny pipeline. Preflight checks imports, declared dependencies, the actual
+launcher configuration, compiler support, padding gradients, tied-weight loading,
+PyTorch/CuPy buffer copies, and whether transfer buckets fit the largest tensor.
+It does not establish collective-transfer correctness, full training memory fit,
+or successful generated harnesses; those require the end-to-end tiny test.
+
+The fixes were exercised during development on Python 3.11, PyTorch 2.13.0 with
+CUDA 13, vLLM 0.32.0, Transformers 5.19.0, CuPy 14.2.0, and GCC 13.3.1. Those
+GPU runs also contained separate two-GPU memory adaptations and recovery code.
+This compatibility-only extraction still needs a clean installation and an
+end-to-end run with the repository's original four-GPU profiles before it can
+be considered independently validated. Installation retains the existing broad
+dependency ranges and can resolve newer versions; record `pip-freeze.txt` and
+avoid reinstalling into an experiment's active environment.
+
+Dependency-free regression tests: `python3 -m unittest discover -s tests -v`.
+
+### Runtime diagnostics
+
+- **Trainer out of memory:** the profiles in this branch allocate four GPUs.
+  Two-GPU full fine-tuning needs a separately validated memory configuration;
+  the legacy `FSDP_OPTIM_OFFLOAD` flag alone did not prevent Adam initialization
+  from exhausting GPU memory in development trials.
 - **Ray hangs at startup:** too few CPUs for the agent workers. Lower `AGENT_NUM_WORKERS` in the profile.
 - **Proposer check fails on tool calls:** check the vLLM tool-call / reasoning parser names for the model and set `TOOL_CALL_PARSER` / `REASONING_PARSER` in `config.env`.
 - **Proposer check fails with a context error (small models):** lower `PROPOSER_MAX_MODEL_LEN` only if the model cannot serve it. Claude Code's system prompt plus the skill file is long, and a 4B failing here is itself a result: it is logged separately from bad edits.
