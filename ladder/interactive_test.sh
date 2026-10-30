@@ -20,7 +20,7 @@ export LADDER_NUM_GPUS=4
 t0=$SECONDS
 
 echo "== preflight =="
-bash setup/preflight.sh "$ARM" || { echo "preflight failed; fix the FAIL lines first"; exit 1; }
+bash setup/preflight.sh "$ARM" "$PROFILE" || { echo "preflight failed; fix the FAIL lines first"; exit 1; }
 
 echo "== fresh start for $ARM / $PROFILE =="
 RUN_OUT="$(
