@@ -1,0 +1,43 @@
+{
+  "kind": "historical development measurements, not a GPU run of the extracted branch",
+  "hardware": "2 x H100 80GB, 24 CPU cores, 256 GiB host memory",
+  "job_id": 50023463,
+  "source": "validation_results/2026-10-29-j50023463/results/timing.jsonl and passed.json in the development checkout",
+  "matched_comparison": {
+    "same_checkpoint_and_saved_candidates": true,
+    "candidates": 3,
+    "puzzles_per_candidate": 256,
+    "attempts_per_puzzle": 1,
+    "candidate_rollouts_per_case": 768,
+    "round_including_both_transitions_s": {
+      "restart": 559.7063698889688,
+      "sleep": 393.6997785307467,
+      "sleep_overlap": 394.85189832374454
+    },
+    "to_scoring_s": {
+      "restart": 72.34691595844924,
+      "sleep": 0.8518962226808071
+    },
+    "to_proposing_s": {
+      "restart": 64.18114768713713,
+      "sleep": 0.8695658454671502
+    }
+  },
+  "feedback_search": {
+    "passed": true,
+    "iterations": 2,
+    "new_candidates_per_iteration": 3,
+    "scoring_and_switching_round_s": [389.90539343934506, 391.2853856915608],
+    "historical_transition_overlap": true,
+    "historical_baseline_solver_gpus": 1
+  },
+  "limitations": [
+    "Timings exclude initial model loading and proposal generation.",
+    "Both matched cases score with two solver GPUs; this is not a one-versus-two-GPU comparison.",
+    "Overlap did not improve the matched comparison; extracted search defaults to serialized switching.",
+    "Extracted search scores the incoming baseline on both GPUs; the historical real search used one for the baseline.",
+    "Six consecutive search iterations and the exact extracted branch still need GPU validation.",
+    "Later trials encountered invalid proposer output; successful switching does not establish reliable candidate generation.",
+    "No persistent server reuse across training cycles or checkpoint hot reload is included."
+  ]
+}
