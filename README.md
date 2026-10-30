@@ -227,3 +227,53 @@ Dependency-free regression tests: `python3 -m unittest discover -s tests -v`.
 - **Proposer check fails on tool calls:** check the vLLM tool-call / reasoning parser names for the model and set `TOOL_CALL_PARSER` / `REASONING_PARSER` in `config.env`.
 - **Proposer check fails with a context error (small models):** lower `PROPOSER_MAX_MODEL_LEN` only if the model cannot serve it. Claude Code's system prompt plus the skill file is long, and a 4B failing here is itself a result: it is logged separately from bad edits.
 - **Preflight "outbound internet" fails:** compute nodes have no internet. Run the local rungs; the DeepSeek rung needs a different setup.
+
+
+## Shared two-GPU rollout/training validation (draft)
+
+`ladder/hybrid_test.sh` is an opt-in one/two-step runner for two H100 80 GB GPUs,
+24 CPU cores and 256 GiB host memory. The same two GPUs run independent vLLM
+replicas during generation and FSDP2 workers during training. It selects WHALE's
+existing `main_ppo` entrypoint in private launcher copies. The regular ladder
+profiles and alternating driver retain their original behavior.
+
+Defaults: 256 training puzzles x 8 attempts (2,048 rollouts per step), eight
+agent workers, CUDA graphs (`ENFORCE_EAGER=false`), 75% inference memory, Triton
+GDN prefill, native CPU offload, and one SFT epoch with a minibatch of 32 per
+GPU (64 globally). Each training step saves weights and runs a small validation
+of 16 test puzzles x 2 attempts. The saved checkpoint resumes model/dataloader
+state; the upstream model+extra checkpoint does not preserve Adam state.
+
+After installing this branch's patches, inside an existing two-H100 allocation:
+
+```bash
+export LADDER_ROOT=/path/to/your/whale-ladder-work
+export LADDER_GCC_MODULE=gcc/13.3.1-p20240614
+# Use separate, fresh output directories for composition and execution.
+bash ladder/hybrid_test.sh "$LADDER_ROOT/review/shared-config" --dry-run
+HYBRID_TRAINING_STEPS=1 bash ladder/hybrid_test.sh "$LADDER_ROOT/review/shared-step"
+# Or evaluate 256 test puzzles x 8 attempts from a completed checkpoint:
+HYBRID_MODE=eval HYBRID_SOURCE_CHECKPOINT=/path/to/global_step_1 \
+  bash ladder/hybrid_test.sh "$LADDER_ROOT/review/shared-eval"
+```
+
+`--dry-run` prepares launcher/data files and composes Hydra configuration; it
+starts no training or inference. Execution uses an existing allocation and
+cleans up its own Ray processes; this runner does not submit or cancel jobs.
+`HYBRID_AGENT_NUM_WORKERS` and `HYBRID_GPU_MEM_UTIL` remain explicit overrides
+for matched comparisons. Use a fresh output directory for every setting.
+
+Recorded development measurements are in `benchmarks/shared-two-gpu.json`.
+On the same checkpoint and 2,048 evaluation rollouts, four versus eight workers
+took 1,342.768 versus 1,064.366 seconds for generation and output processing,
+with similar output-token totals. A subsequent training run generated 2,048
+rollouts in 1,056.85 seconds and performed two SFT updates in 292.87 seconds.
+The small eager/graph comparison used 128 rollouts and a single rollout GPU;
+its speedup should not be extrapolated as a universal multiplier. The 75%
+memory setting worked, but a matched 60% control was not completed.
+
+This is a review extraction from development runs. It removes optional live
+progress instrumentation and persistent-server integration, and makes the
+measured eight-worker/75% configuration the opt-in runner's defaults. Its exact
+extracted revision still needs a GPU generation/update validation before
+merging. It is not a complete harness-search or full research schedule.
