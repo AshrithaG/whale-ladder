@@ -379,7 +379,12 @@ class Experiment:
         # Invalid proposals are skipped and recorded by WHALE's patched loop
         # (patches/candidate-validation.patch); nothing is repaired or retried.
         invalid = [r for r in rows if str(r.get('status', '')).startswith('rejected')]
-        outcome = dict(candidates_evaluated=len(names), candidates_rejected=len(invalid),
+        rejected_slots = {(r['iteration'], r['harness']) for r in invalid if r.get('requested_slot', True)}
+        evaluated_slots = {(r['iteration'], r['harness']) for r in rows if r.get('status') == 'evaluated'}
+        if len(evaluated_slots) + len(rejected_slots) != self.proposals * iterations:
+            raise RuntimeError('Candidate slot accounting incomplete: inspect evolution_summary.jsonl')
+        outcome = dict(candidates_evaluated=len(evaluated_slots), candidates_rejected=len(rejected_slots),
+                       candidates_missing=sum(r.get('status') == 'rejected_missing' for r in invalid),
                        rejected_reasons=[r.get('reason', '') for r in invalid],
                        accepted_harness=(run_dir/'logs/accepted_harness.txt').read_text().strip())
         self.event('search_outcome', **outcome)

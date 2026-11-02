@@ -13,6 +13,97 @@ proposer scaffold and its skill files) stays as WHALE released it.
 | `whale_qwen4b` | Qwen3.5-4B base weights, frozen (weak) | PSC, 1 GPU |
 | `whale_self` | the checkpoint just trained (self-improvement) | PSC, 1 GPU |
 
+## Candidate: persistent two-GPU validation
+
+This branch builds on PR4 (and therefore PRs 1–3). The optional
+`persistent-smoke` profile adds the search-server persistence used in the PSC
+development trials. It supports **two H100s and the fixed base-4B proposer**;
+the ordinary runner remains available for the other arms. Real GPU validation
+of this combined candidate is pending. CPU simulations do not establish GPU
+memory fit, kernel compatibility, model quality, or a research result.
+
+```bash
+bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
+```
+
+The profile runs two cycles, each with one 256-puzzle × 8-attempt training
+batch, a weight update, and one three-candidate search iteration. Each usable
+candidate is scored on 256 puzzles once. The final model/harness is evaluated
+on the held-out 256 puzzles × 8 attempts. This is a validation schedule;
+`h100` retains the separate full-run schedule.
+
+Search processes start after cycle 1 training. Before cycle 2 training they
+drain and sleep; a fresh sleep receipt and GPU-memory check gate training.
+After training, both solver replicas reload the new checkpoint, clear prefix
+caches, and verify full parameter checksums agree and changed. The base
+proposer's checksums must stay fixed. A failed reload disables routing and
+fails the run; no service restart or candidate repair is attempted. Model
+and dataloader state carry between phases; Adam state resets as in PR4.
+
+Invalid candidate Python is skipped and recorded. Missing output consumes
+its requested slot as `rejected_missing`; it is not replaced. Valid candidates
+are evaluated; an entirely invalid iteration keeps the incumbent. PR4's
+manifest-name aliases and recovery from malformed manifests are retained.
+Metadata errors are recorded separately from requested-slot counts. Scoring
+and infrastructure failures still fail the run.
+
+Outputs use PR4's `$OUT_ROOT/cycles/<arm>-<profile>-s<seed>/` layout. Search
+receipts record evaluated/rejected/missing counts, server PIDs, checksums and
+the original server-log directory. Each invocation records source hashes.
+Completed phases may be reused with the same plan and incoming state;
+unfinished phases are preserved under `.unfinished-*` and rerun. There is no
+in-place candidate repair or partial-search recovery.
+
+### CPU validation
+
+On Linux, after `setup/install_mock.sh`, run `ladder/mock_run.sh` and
+`ladder/mock_persistent.sh`. The latter checks two cycles with bad Python,
+missing functions and an empty proposal, changing solver weights, unchanged
+server PIDs/proposer weights, checkpoint/harness handoffs, resume, and cleanup.
+On a Mac, the same Linux checks can run in Docker:
+
+```bash
+docker build -f tests/mock/Dockerfile -t whale-ladder-cpu .
+mkdir -p /tmp/whale-ladder-cpu-results
+docker run --rm --cpus=4 --memory=4g \
+  --mount type=bind,source=/tmp/whale-ladder-cpu-results,target=/results \
+  whale-ladder-cpu
+```
+
+Use a fresh results directory for an independent run. All model serving,
+training and API calls in these mocks are simulated; no provider credits are
+used. Logs are retained in the results directory.
+
+### Isolated PSC installation
+
+Use a new installation root. Existing models and the exact shared dataset
+can be reused as inputs while Python packages and patched WHALE remain
+separate from the historical installation:
+
+```bash
+export LADDER_ROOT=/absolute/path/to/new-candidate-work
+export LADDER_MODEL_CACHE=/absolute/path/to/existing/hf
+export CHESS_DATA_FROM=/absolute/path/to/shared/parquet-files
+export CHESS_DATA_FINGERPRINT=<shared-dataset-fingerprint>
+sbatch -A YOUR_ACCOUNT slurm/candidate_setup.sbatch
+```
+
+The CPU setup job selects Python 3.11.18, Claude Code 2.1.197 and the captured
+Linux/CUDA-13 dependency constraints in
+`setup/constraints/psc-py311-cu130.txt`. Constraints were captured from the
+working PSC environment, which passed `pip check`; a clean constrained install
+is still a required validation. CPU setup defers GPU kernel checks.
+
+After setup succeeds, submit `slurm/candidate_validate.sbatch` with the same
+environment (or use Slurm's `afterok:<setup-job-id>` dependency). It requests
+two H100s for four hours, checks GPU kernels and preflight, then runs the two
+cycles and final test. Its control directory is
+`$LADDER_ROOT/jobs/candidate-<job-id>/`. Failure retains the allocation until
+wall time for diagnosis; creating `retry` in that directory requests another
+attempt. Success ends the batch job. It never cancels another job. Submit
+from a clean checkout: validation requires the prepared and running code
+revisions to match.
+
 ## Running an arm: one command
 
 `ladder/run_cycles.sh ARM PROFILE` runs one arm end to end on the two-GPU

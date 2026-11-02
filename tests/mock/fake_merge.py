@@ -13,6 +13,9 @@ ap.add_argument("--target_dir", required=True, type=Path)
 a = ap.parse_args()
 assert (a.local_dir / "model_world_size_1_rank_0.pt").exists(), f"no actor shards in {a.local_dir}"
 a.target_dir.mkdir(parents=True, exist_ok=True)
-(a.target_dir / "config.json").write_text(json.dumps({"mock": True, "merged_from": str(a.local_dir)}) + "\n")
-(a.target_dir / "model.safetensors").write_bytes(b"mock")
+# Architecture/tokenizer stay fixed while the simulated weights change.
+(a.target_dir / "config.json").write_text('{"mock": true}\n')
+lineage = a.local_dir.parent / 'mock_lineage.json'
+weights = lineage.read_bytes() if lineage.exists() else b'mock'
+(a.target_dir / "model.safetensors").write_bytes(weights)
 print(f"mock merge: {a.local_dir} -> {a.target_dir}")

@@ -18,6 +18,7 @@ import random
 import re
 import sys
 import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -54,7 +55,12 @@ def main() -> None:
     ap.add_argument("--served-model-name", default=None)
     args, _ = ap.parse_known_args(sys.argv[2:])
     served = args.served_model_name or args.model
-    state = {"sleeping": False, "requests": 0}
+    def weight_checksum(model):
+        shards = sorted(Path(model).glob('*.safetensors'))
+        data = b''.join(p.read_bytes() for p in shards) if shards else model.encode()
+        return hashlib.sha256(data).hexdigest()
+
+    state = {"sleeping": False, "requests": 0, "weights": weight_checksum(args.model)}
     print(f"mock vllm: serving model={args.model} as served_name={served} on port {args.port}", flush=True)
 
     class Handler(BaseHTTPRequestHandler):
@@ -99,6 +105,17 @@ def main() -> None:
             elif path == "/wake_up":
                 state["sleeping"] = False
                 self.reply(200, "")
+            elif path == "/collective_rpc":
+                req = json.loads(body)
+                if req['method'] == 'compute_weight_checksums':
+                    self.reply(200, {'results': [{'mock.weight': state['weights']}]})
+                elif req['method'] == 'reload_weights':
+                    state['weights'] = weight_checksum(req['kwargs']['weights_path'])
+                    self.reply(200, {'results': [None]})
+                else:
+                    self.reply(400, {'error': 'unknown mock RPC'})
+            elif path == "/reset_prefix_cache":
+                self.reply(200, {'success': True})
             elif path == "/v1/chat/completions":
                 if state["sleeping"]:
                     self.reply(503, {"error": "mock server is sleeping"})

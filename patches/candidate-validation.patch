@@ -1,11 +1,12 @@
 diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
-index 2b235b3..94549a0 100644
 --- a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
 +++ b/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
-@@ -199,6 +199,95 @@ def recover_pending_candidates(run_dir: Path, names: list[str]) -> list[dict[str
+@@ -197,6 +197,109 @@
+             }
+         )
      return candidates
- 
- 
++
++
 +def _reject_row(
 +    iteration: int, name: str, candidate: dict[str, Any], reason: str, status: str = "rejected_invalid"
 +) -> dict[str, Any]:
@@ -92,13 +93,25 @@ index 2b235b3..94549a0 100644
 +            continue
 +        valid_names.append(name)
 +        valid_candidates.append(candidate)
++    # Every requested slot consumes its opportunity, even when the proposer
++    # emits no files or an entry with an unassigned name. Metadata errors are
++    # recorded too, but do not create extra candidate opportunities.
++    represented = set(valid_names) | {
++        row["harness"] for row in invalid_rejects + prompt_only_rejects
++        if row["harness"] in next_names
++    }
++    for name in next_names:
++        if name not in represented:
++            invalid_rejects.append(_reject_row(
++                iteration, name, {}, "No usable proposal for this requested slot", "rejected_missing"
++            ))
++    for row in invalid_rejects + prompt_only_rejects:
++        row["requested_slot"] = row["harness"] in next_names
 +    return valid_names, valid_candidates, invalid_rejects, prompt_only_rejects
-+
-+
- def build_harness_list(run_dir: Path, names: list[str]) -> list[tuple[str, Path]]:
-     return [(name, run_dir / "harnesses" / name / "harness.py") for name in names]
  
-@@ -479,58 +568,27 @@ def run_evolve(args: argparse.Namespace) -> None:
+ 
+ def build_harness_list(run_dir: Path, names: list[str]) -> list[tuple[str, Path]]:
+@@ -479,58 +582,27 @@
                  use_api_key=args.use_api_key,
              )
              result.show()

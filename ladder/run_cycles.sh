@@ -39,6 +39,14 @@ if [[ " ${LADDER_SKIP_ARMS:-} " == *" $ARM "* ]]; then
 fi
 export PROFILE
 
+# The persistent mode keeps the PR4 output layout and candidate-validation
+# rules. It is opt-in while GPU validation is pending.
+if [[ "${LADDER_PERSISTENT_SEARCH:-0}" == 1 ]]; then
+  export ARM
+  source "$LADDER_HOME/ladder/arm_env.sh"
+  exec python "$LADDER_HOME/tools/persistent_cycles.py" --arm "$ARM" --profile "$PROFILE"
+fi
+
 run_name="${ARM}-${PROFILE}-s${SEED}"
 state="$OUT_ROOT/cycles/$run_name"
 mkdir -p "$state"

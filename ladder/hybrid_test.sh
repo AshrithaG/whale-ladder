@@ -37,7 +37,7 @@ export RUN_NAME="${HYBRID_RUN_NAME:-hybrid-check-j$job_tag}"
 [[ "$RUN_NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid hybrid run name' >&2; exit 2; }
 export RUN_OUT="$test_dir" OUTPUT_ROOT="$test_dir/checkpoints"
 export PROJECT_DIR="$DOMAIN_DIR"
-export RAY_TMPDIR="/tmp/ray-${USER}-${job_tag}-hy"
+export RAY_TMPDIR="/tmp/ray-${USER:-u}-${job_tag}-hy"
 export N_GPUS_PER_NODE="$num_gpus" NNODES=1 ROLLOUT_GPUS_PER_NODE="$num_gpus" ROLLOUT_NNODES=1
 export TRAIN_BATCH_SIZE="${HYBRID_TRAIN_BATCH:-256}" ROLLOUT_N="${HYBRID_ROLLOUT_N:-8}" VAL_ROLLOUT_N="${HYBRID_VAL_ROLLOUT_N:-2}"
 export PPO_MINI_BATCH_SIZE="$TRAIN_BATCH_SIZE"
@@ -104,7 +104,11 @@ cleanup() {
   stop_job_ray
 }
 trap cleanup EXIT
-wait_gpus_free 120
+if [[ -n "${HYBRID_PERSISTENT_SLEEP_RECEIPT:-}" ]]; then
+  python "$LADDER_HOME/tools/persistent_search.py" --check-sleep-receipt "$HYBRID_PERSISTENT_SLEEP_RECEIPT"
+else
+  wait_gpus_free 120
+fi
 echo "HYBRID CHECK START: mode=$mode; $num_gpus GPU(s); memory=$GPU_MEM_UTIL; backend=${HYBRID_GDN_PREFILL_BACKEND:-triton}; $((TRAIN_BATCH_SIZE * ROLLOUT_N)) rollouts per full batch"
 timeout --signal=TERM --kill-after=60s "${HYBRID_TIMEOUT_S:-5400}s" bash "$launcher" "${args[@]}" 2>&1 | tee "$test_dir/console.log"
 export HYBRID_VALIDATION_START_STEP="$start_step"

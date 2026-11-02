@@ -1,0 +1,40 @@
+{
+  "kind": "CPU orchestration validation; all models/training/APIs simulated",
+  "validated_on": "2026-11-02",
+  "base_pr4": "8bd6d6aee47055c979dfc238b19f1454796d763e",
+  "unit_tests_passed": 28,
+  "pr4_mock_checks_passed": 56,
+  "persistent_cycles_passed": 2,
+  "same_model_server_pids_across_cycles": true,
+  "solver_weight_digest_changed": true,
+  "cycles": [
+    {
+      "requested": 6,
+      "evaluated": 4,
+      "rejected": 2,
+      "missing": 0
+    },
+    {
+      "requested": 6,
+      "evaluated": 3,
+      "rejected": 3,
+      "missing": 3
+    }
+  ],
+  "resume_without_retraining_or_reproposal": true,
+  "final_mock_test_passed": true,
+  "gpu_validated": false,
+  "limits": [
+    "No real model generation or training",
+    "No proof of GPU kernel/memory compatibility",
+    "No validation of persistent 27B/API/self configurations"
+  ],
+  "runtime_source_sha256": {
+    "tools/persistent_cycles.py": "edb395645c63aed4cb3169bfcfe31c4e0ac842c1dad8822d049f396049932b1f",
+    "tools/persistent_search.py": "8780605b48b3b1dca2e26a63a8795cf6487513ac4530f6a6509ff76bc13c19db",
+    "tools/two_gpu_search.py": "03484ba41d06c405b2cf248e1baa25660dddbaac74b50bb1a644bfdddcd57d1f",
+    "ladder/run_cycles.sh": "91bc1b5a8209b0d22fa75a5843828820523b7f84a765c8d525bb4f07fb08e7bd",
+    "ladder/hybrid_test.sh": "81cf45971ec87a0df7ee70cdfd50b3a51a8166c0bd77659d4760e75339b4b5ad",
+    "patches/candidate-validation.patch": "82b0bbad88897181624fb24ce0ba261e869d0e41c38170208428549e26cf3782"
+  }
+}

@@ -16,7 +16,18 @@ source "$LADDER_HOME/ladder/config.env"
 # INSTALL_PROFILE=mini4090 downloads that profile's solver as well.
 [[ -n "${INSTALL_PROFILE:-}" ]] && source "$LADDER_HOME/ladder/profiles/$INSTALL_PROFILE.env"
 set +a
+if [[ -n "${LADDER_GCC_MODULE:-}" ]]; then
+  export HOSTNAME="$(hostname)"
+  module load "$LADDER_GCC_MODULE"
+  export CC="$(command -v gcc)" CXX="$(command -v g++)" CUDAHOSTCXX="$(command -v g++)"
+fi
 say() { echo "[install $(date '+%T')] $*"; }
+# The PSC profiles select a captured constraints file. All pip invocations,
+# including the helper scripts, inherit the same version restrictions.
+if [[ -n "${INSTALL_CONSTRAINTS:-}" ]]; then
+  [[ -f "$INSTALL_CONSTRAINTS" ]] || { say "ERROR: missing constraints: $INSTALL_CONSTRAINTS"; exit 2; }
+  export PIP_CONSTRAINT="$(cd "$(dirname "$INSTALL_CONSTRAINTS")" && pwd)/$(basename "$INSTALL_CONSTRAINTS")"
+fi
 mkdir -p "$LADDER_ROOT" "$HF_HOME" "$OUT_ROOT"
 
 # ---- 1. WHALE at the pinned commit, with every ladder patch ---------------
@@ -37,7 +48,7 @@ if [[ ! -x "$CONDA_ENV/bin/python" ]]; then
     export PATH="$LADDER_ROOT/miniforge/bin:$PATH"
   fi
   say "creating conda env with python 3.11 and nodejs 20"
-  conda create -y -q -p "$CONDA_ENV" -c conda-forge python=3.11 "nodejs=20"
+  conda create -y -q -p "$CONDA_ENV" --override-channels -c conda-forge "python=${INSTALL_PYTHON_VERSION:-3.11}" "nodejs=20"
 fi
 if [[ ! -x "$VENV/bin/python" ]]; then
   "$CONDA_ENV/bin/python" -m venv "$VENV"
@@ -63,13 +74,15 @@ pip install -q -e "$LADDER_HOME/shim"
 # Faster Gated DeltaNet kernels for Qwen3.5 training; transformers falls back
 # to a slower path without them.
 pip install -q flash-linear-attention || say "WARN: flash-linear-attention failed to install; training will be slower"
-bash "$LADDER_HOME/setup/install_gpu_kernels.sh"
+if [[ "${INSTALL_SKIP_GPU_KERNELS:-0}" != 1 ]]; then
+  bash "$LADDER_HOME/setup/install_gpu_kernels.sh"
+fi
 pip freeze > "$LADDER_ROOT/pip-freeze.txt"
 
 # ---- 3. Claude Code CLI (the WHALE proposer scaffold) -----------------------
 if [[ ! -x "$VENV/bin/claude" ]]; then
   say "installing Claude Code CLI into the venv"
-  PATH="$CONDA_ENV/bin:$PATH" npm install -g -s --prefix "$VENV" @anthropic-ai/claude-code
+  PATH="$CONDA_ENV/bin:$PATH" npm install -g -s --prefix "$VENV" "@anthropic-ai/claude-code${CLAUDE_CODE_VERSION:+@$CLAUDE_CODE_VERSION}"
 fi
 say "claude $("$VENV/bin/claude" --version 2>/dev/null || echo 'version unknown')"
 
