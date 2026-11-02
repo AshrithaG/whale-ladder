@@ -1,0 +1,24 @@
+diff --git a/domains/chess_puzzles/scripts/train_chess_puzzle_multinode_disagg.sh b/domains/chess_puzzles/scripts/train_chess_puzzle_multinode_disagg.sh
+--- a/domains/chess_puzzles/scripts/train_chess_puzzle_multinode_disagg.sh
++++ b/domains/chess_puzzles/scripts/train_chess_puzzle_multinode_disagg.sh
+@@ -314,6 +314,8 @@
+     actor_rollout_ref.actor.ppo_max_token_len_per_gpu="$ACTOR_PPO_MAX_TOKEN_LEN_PER_GPU" \
+     actor_rollout_ref.actor.ppo_mini_batch_size="$PPO_MINI_BATCH_SIZE" \
+     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="$PPO_MICRO_PER_GPU" \
++    actor_rollout_ref.actor.strategy="${FSDP_STRATEGY:-fsdp}" \
++    actor_rollout_ref.actor.fsdp_config.offload_policy="${FSDP_NATIVE_CPU_OFFLOAD:-False}" \
+     actor_rollout_ref.actor.fsdp_config.reshard_after_forward=False \
+     actor_rollout_ref.actor.fsdp_config.param_offload="$FSDP_PARAM_OFFLOAD" \
+     actor_rollout_ref.actor.fsdp_config.optimizer_offload="$FSDP_OPTIM_OFFLOAD" \
+diff --git a/domains/chess_puzzles/verl/utils/fsdp_utils.py b/domains/chess_puzzles/verl/utils/fsdp_utils.py
+--- a/domains/chess_puzzles/verl/utils/fsdp_utils.py
++++ b/domains/chess_puzzles/verl/utils/fsdp_utils.py
+@@ -543,6 +543,8 @@
+     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
+         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+ 
++    # New Transformers releases expose _no_split_modules as a set.
++    fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap or [])
+     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
+ 
+     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
