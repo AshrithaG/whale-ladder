@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, timezone
 import http.client
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -42,8 +43,11 @@ def progress(root):
     paths = list((root / 'cycles').glob('*/c*-train/rollout-progress'))
     paths += list((root / 'cycles').glob('*/final-test/rollout-progress'))
     paths += list((root / 'harness-runs').glob('*/logs/**/rollout-progress'))
+    for pointer in (root / 'cycles').glob('*/*-search/harness-run-dir'):
+        try:paths += list((Path(pointer.read_text().strip()) / 'logs').glob('**/rollout-progress'))
+        except OSError:pass
     for path in paths:
-        result[str(path.relative_to(root))] = aggregate(path)
+        result[str(path.relative_to(root)) if path.is_relative_to(root) else str(path)] = aggregate(path)
     return result
 
 
@@ -71,12 +75,16 @@ def inference_metrics(psutil, opener):
             name = process.info['name'] or ''
             if 'vLLMHttpServer' not in name and name not in ('vllm', 'vllm serve'):
                 continue
+            if os.environ.get('SLURM_JOB_ID'):
+                if process.uids().real != os.getuid() or process.environ().get('SLURM_JOB_ID') != os.environ['SLURM_JOB_ID']:
+                    continue
             for conn in process.net_connections(kind='tcp'):
                 if conn.status != 'LISTEN' or ':' in conn.laddr.ip:
                     continue
                 port = conn.laddr.port
                 try:
-                    with opener.open(f'http://127.0.0.1:{port}/metrics', timeout=1) as response:
+                    host='127.0.0.1' if conn.laddr.ip=='0.0.0.0' else conn.laddr.ip
+                    with opener.open(f'http://{host}:{port}/metrics', timeout=1) as response:
                         metrics = parse_metrics(response.read().decode())
                 except (http.client.HTTPException, OSError, ValueError) as exc:
                     errors.append(dict(pid=process.pid, port=port, type=type(exc).__name__))
@@ -97,9 +105,11 @@ def snapshot(root, psutil, opener):
         rollouts=progress(root), training=training_totals(root))
     memory = psutil.virtual_memory()
     row['cpu_ram'] = dict(total_bytes=memory.total, available_bytes=memory.available,
-                          used_bytes=memory.used, cpu_percent=psutil.cpu_percent())
+                          used_bytes=memory.used, cpu_percent=psutil.cpu_percent(),
+                          scope='host' if os.environ.get('SLURM_JOB_ID') else 'container')
     try:
-        row['gpus_csv'] = subprocess.check_output(['nvidia-smi',
+        selected=['-i',os.environ['LADDER_JOB_GPUS']] if os.environ.get('LADDER_JOB_GPUS') else []
+        row['gpus_csv'] = subprocess.check_output(['nvidia-smi',*selected,
             '--query-gpu=index,uuid,memory.used,memory.total,utilization.gpu,power.draw',
             '--format=csv,noheader,nounits'], text=True, timeout=5)
         row['gpu_columns'] = ['index', 'uuid', 'memory_used_mib', 'memory_total_mib', 'utilization_percent', 'power_watts']

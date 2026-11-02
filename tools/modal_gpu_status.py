@@ -35,7 +35,7 @@ def describe(live):
         lines.append('Observation error: ' + live['observation_error'])
         return '\n'.join(lines)
     phase = live.get('phase') or {}
-    lines.append(f"Container phase: {phase.get('phase', 'not reported')} ({phase.get('state', 'running')})")
+    lines.append(f"Run phase: {phase.get('phase', 'not reported')} ({phase.get('state', 'running')})")
     for row in live.get('controller_phases', {}).values():
         if row:
             elapsed = (row.get('ended_unix') or live['time']) - row['started_unix']
@@ -52,7 +52,7 @@ def describe(live):
                      f"optimizer updates {row['optimizer_updates']}")
     ram = live.get('cpu_ram') or {}
     if ram:
-        lines.append(f"CPU: {ram['cpu_percent']:.1f}% (all visible CPUs); RAM used "
+        lines.append(f"CPU: {ram['cpu_percent']:.1f}% ({ram.get('scope','visible CPUs')}); RAM used "
                      f"{ram['used_bytes']/2**30:.1f}/{ram['total_bytes']/2**30:.1f} GiB")
     if live.get('gpus_csv'):
         lines.append('GPUs (index, UUID, used/total MiB, utilization %, watts):\n' + live['gpus_csv'].strip())
@@ -67,13 +67,20 @@ def describe(live):
 
 
 def main():
-    import modal
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--receipt', required=True, type=Path)
+    group=parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--receipt', type=Path)
+    group.add_argument('--local-root', type=Path)
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args()
-    receipt = json.loads(args.receipt.read_text())
-    volume = modal.Volume.from_name(receipt['plan']['results_volume'])
+    if args.local_root:
+        class Files:
+            def read_file(self,name):return [(args.local_root / name.lstrip('/')).read_bytes()]
+        volume=Files()
+    else:
+        import modal
+        receipt = json.loads(args.receipt.read_text())
+        volume = modal.Volume.from_name(receipt['plan']['results_volume'])
     live = load_snapshot(volume)
     # Finalization can occur after the last heartbeat; do not present that
     # older heartbeat as evidence the App is still executing.

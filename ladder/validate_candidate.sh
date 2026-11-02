@@ -1,17 +1,61 @@
 #!/usr/bin/env bash
 # Failures return to the allocation-retaining outer Slurm controller.
 set -euo pipefail
-repo="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exports="$(python3 "$repo/setup/load_candidate_config.py" "${1:?job configuration required}")"
 eval "$exports"
 cd "$LADDER_CODE_DIR"
 git diff --quiet && git diff --cached --quiet
 [[ "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" ]] || { echo 'Unexpected candidate code revision' >&2; exit 2; }
-[[ "$(cat "$LADDER_ROOT/installed-revision")" == "$EXPECTED_REVISION" ]] || {
-  echo 'Installation differs from this revision; rerun candidate setup' >&2; exit 2;
-}
+installed="$(cat "$LADDER_ROOT/installed-revision")"
+if [[ "$installed" != "$EXPECTED_REVISION" ]]; then
+  [[ "${LADDER_REUSE_INSTALL_BASE:-}" == "$installed" ]] || {
+    echo 'Installation differs; explicit verified reuse or fresh setup is required' >&2; exit 2;
+  }
+  "$LADDER_ROOT/venv/bin/python" setup/check_install_reuse.py --code "$LADDER_CODE_DIR" --prepared "$installed" \
+    --runtime "$EXPECTED_REVISION" --output "$LADDER_ROOT/jobs/compatibility-$EXPECTED_REVISION.json"
+fi
 export LADDER_GCC_MODULE="${LADDER_GCC_MODULE:-gcc/13.3.1-p20240614}"
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
-bash setup/install_gpu_kernels.sh
-bash setup/preflight.sh whale_qwen4b persistent-smoke
-bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
+source ladder/config.env
+profile="${LADDER_VALIDATION_PROFILE:-persistent-smoke}"
+source "$LADDER_ROOT/venv/bin/activate"
+export LADDER_JOB_GPUS="${LADDER_JOB_GPUS:-${CUDA_VISIBLE_DEVICES:?missing Slurm GPU assignment}}"
+control="$LADDER_ROOT/runs/modal-control"
+mkdir -p "$control"
+python tools/observe_run.py "$LADDER_ROOT/runs" > "$control/observer.log" 2>&1 &
+observer=$!
+phase=starting
+finish() {
+  result=$?
+  python - "$control/status.json" "$phase" "$result" <<'PY'
+import json,sys,time
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(dict(provider='psc',phase=sys.argv[2],
+    state='completed' if sys.argv[3]=='0' else 'failed',ended_unix=time.time())))
+PY
+  kill -TERM "$observer" 2>/dev/null || true
+}
+trap finish EXIT
+run_phase() {
+  phase="$1"; shift
+  start="$(date +%s)"
+  python - "$control/status.json" "$phase" <<'PY'
+import json,sys,time
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(dict(provider='psc',phase=sys.argv[2],started_unix=time.time())))
+PY
+  set +e
+  "$@" 2>&1 | tee "$control/$phase.log"
+  result=${PIPESTATUS[0]}
+  set -e
+  python - "$control/phases.jsonl" "$phase" "$start" "$result" <<'PY'
+import json,sys,time
+with open(sys.argv[1],'a') as f:f.write(json.dumps(dict(phase=sys.argv[2],started_unix=int(sys.argv[3]),
+    ended_unix=time.time(),returncode=int(sys.argv[4]),elapsed_seconds=time.time()-int(sys.argv[3])))+'\n')
+PY
+  return "$result"
+}
+run_phase kernels bash setup/install_gpu_kernels.sh
+run_phase preflight bash setup/preflight.sh whale_qwen4b "$profile"
+run_phase cycles bash ladder/run_cycles.sh whale_qwen4b "$profile"
