@@ -111,7 +111,7 @@ The CPU setup job selects Python 3.11.18, Claude Code 2.1.197 and the captured
 Linux/CUDA-13 dependency constraints in
 `setup/constraints/psc-py311-cu130.txt`. Constraints were captured from the
 working PSC environment. A separate clean environment passed installation
-and `pip check` on 2026-11-02 (setup job `50118625`, 17m19s). Its installed
+and `pip check` on 2026-11-02 (runtime `f6b60cd`, setup job `50120240`, 13m23s). Its installed
 package versions matched the constraints, and the patched WHALE source
 matched a reconstruction from the pinned upstream commit and this branch's
 patches. CPU setup defers GPU kernel checks.
