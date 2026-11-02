@@ -68,6 +68,7 @@ def main() -> None:
                 "def propose_action(", "def propose_action_removed(")
         if scenario == "wrong_slot" and entries:
             entries[0]["name"] = "h999"
+            writes["harnesses/h999/harness.py"] = writes.pop(f"harnesses/{slots[0]}/harness.py")
         manifest = "{not json" if scenario == "garbage_manifest" else json.dumps({"candidates": entries}, indent=2)
         writes["pending_eval.json"] = manifest
     elif scenario not in ("no_output", "crash"):

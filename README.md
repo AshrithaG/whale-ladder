@@ -59,6 +59,9 @@ are evaluated; an entirely invalid iteration keeps the incumbent. PR4's
 manifest-name aliases and recovery from malformed manifests are retained.
 Metadata errors are recorded separately from requested-slot counts. Scoring
 and infrastructure failures still fail the run.
+WHALE assigns slot names after existing numbered folders, so names can have
+gaps. Slot accounting uses the iteration and its assigned names, rather than
+assuming a consecutive range such as `h1` through `h6`.
 
 Outputs use PR4's `$OUT_ROOT/cycles/<arm>-<profile>-s<seed>/` layout. Search
 receipts record evaluated/rejected/missing counts, server PIDs, checksums and
@@ -70,9 +73,10 @@ in-place candidate repair or partial-search recovery.
 ### CPU validation
 
 On Linux, after `setup/install_mock.sh`, run `ladder/mock_run.sh` and
-`ladder/mock_persistent.sh`. The latter checks two cycles with bad Python,
-missing functions and an empty proposal, changing solver weights, unchanged
-server PIDs/proposer weights, checkpoint/harness handoffs, resume, and cleanup.
+`ladder/mock_persistent.sh`. The latter checks two cycles with an unassigned
+numbered folder, missing functions and an empty proposal, changing solver
+weights, unchanged server PIDs/proposer weights, checkpoint/harness handoffs,
+resume, and cleanup.
 The [CPU evidence record](benchmarks/persistent-candidate-cpu.json) separates
 these simulated checks from the real PSC package-installation checks.
 On a Mac, the same Linux checks can run in Docker:

@@ -373,8 +373,8 @@ class Experiment:
         summary = run_dir/'logs/evolution_summary.jsonl'
         rows = [json.loads(x) for x in summary.read_text().splitlines()] if summary.exists() else []
         names = {r['harness'] for r in rows if r.get('status')=='evaluated'}
-        expected = {f'h{i}' for i in range(1, self.proposals*iterations+1)}
-        assert names <= expected, (names, expected)
+        # WHALE checks membership in each iteration's assigned slots. Its IDs
+        # follow existing folders, so a rejected stray folder can leave gaps.
         self.validate_scores(run_dir/'logs', names)
         # Invalid proposals are skipped and recorded by WHALE's patched loop
         # (patches/candidate-validation.patch); nothing is repaired or retried.

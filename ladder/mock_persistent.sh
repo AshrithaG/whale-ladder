@@ -18,7 +18,7 @@ export MOCK_STATE_DIR="$OUT_ROOT/persistent-mock-state"
 mkdir -p "$MOCK_STATE_DIR"
 chmod +x "$MOCK"/bin/* "$MOCK/fake_train.sh"
 python "$MOCK/make_data.py" "$WHALE_DIR/domains/chess_puzzles"
-export MOCK_PROPOSER_PLAN_QWEN4B="broken_python,missing_function,no_output,good"
+export MOCK_PROPOSER_PLAN_QWEN4B="wrong_slot,missing_function,no_output,good"
 bash "$LADDER_HOME/ladder/run_cycles.sh" whale_qwen4b mock-persistent > "$MOCK_STATE_DIR/run.log" 2>&1
 # Finished phases must be reusable without generating or training again.
 bash "$LADDER_HOME/ladder/run_cycles.sh" whale_qwen4b mock-persistent > "$MOCK_STATE_DIR/resume.log" 2>&1

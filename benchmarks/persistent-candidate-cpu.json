@@ -12,7 +12,7 @@
       "requested": 6,
       "evaluated": 4,
       "rejected": 2,
-      "missing": 0
+      "missing": 1
     },
     {
       "requested": 6,
@@ -47,7 +47,7 @@
   "runtime_source_sha256": {
     "tools/persistent_cycles.py": "edb395645c63aed4cb3169bfcfe31c4e0ac842c1dad8822d049f396049932b1f",
     "tools/persistent_search.py": "8780605b48b3b1dca2e26a63a8795cf6487513ac4530f6a6509ff76bc13c19db",
-    "tools/two_gpu_search.py": "03484ba41d06c405b2cf248e1baa25660dddbaac74b50bb1a644bfdddcd57d1f",
+    "tools/two_gpu_search.py": "beb724f0bcc5414cfb868a78e698ba85bbf8f41d43513369071c59dc621286c6",
     "ladder/run_cycles.sh": "91bc1b5a8209b0d22fa75a5843828820523b7f84a765c8d525bb4f07fb08e7bd",
     "ladder/hybrid_test.sh": "81cf45971ec87a0df7ee70cdfd50b3a51a8166c0bd77659d4760e75339b4b5ad",
     "patches/candidate-validation.patch": "82b0bbad88897181624fb24ce0ba261e869d0e41c38170208428549e26cf3782"
@@ -57,5 +57,17 @@
     "worker failure holds without automatic retries",
     "worker success also holds",
     "explicit configuration quotes paths safely"
-  ]
+  ],
+  "unassigned_numbered_folder_regression": {
+    "reproduced_failure_before_fix": true,
+    "passes_after_fix": true,
+    "unassigned_folder": "h999",
+    "later_evaluated_assigned_slots": [
+      "h1001",
+      "h1002"
+    ],
+    "no_unassigned_candidate_scored": true,
+    "requested_slots_per_cycle": 6
+  },
+  "reused_slot_verifier_regression": "Selection checks use evaluated rows when an earlier iteration rejected the same slot name."
 }

@@ -28,6 +28,12 @@ for p, receipt in zip(searches, receipts):
     assert not list(p.glob('*repair*'))
     assert not list(run.glob('*repair*'))
 assert receipts[0]['candidates_rejected'] == 2
+first_run = Path((searches[0] / 'harness-run-dir').read_text().strip())
+first_rows = rows(first_run / 'logs/evolution_summary.jsonl')
+assert any(r['harness'] == 'h999' and not r['requested_slot'] for r in first_rows)
+assert any(r['harness'] == 'h1' and r['status'] == 'rejected_missing' for r in first_rows)
+assert {r['harness'] for r in first_rows if r['status'] == 'evaluated'} == {'h2', 'h3', 'h1001', 'h1002'}
+assert not list((first_run / 'logs').glob('*/h999/*/val.json')), 'Unassigned candidate was scored'
 assert receipts[1]['candidates_missing'] == 3
 assert receipts[1]['candidates_evaluated'] == 3
 lineage = next((root / 'c2-train/checkpoints').glob('*/global_step_2/mock_lineage.json'))
