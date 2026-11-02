@@ -65,7 +65,7 @@ def prepare(output, base_image=BASE_IMAGE):
             .run_commands('git -C /opt/whale-ladder fetch /tmp/whale-runtime.bundle HEAD',
                           f'git -C /opt/whale-ladder checkout --detach {revision}')
             .run_function(audit_runtime, args=(revision,), cpu=4, memory=8192, timeout=900,
-                          volumes={'/models': models}, include_source=False))
+                          volumes={'/models': models}, include_source=True))
         app = modal.App('whale-ladder-logging-cpu')
         receipt = app.function(image=image, serialized=True, include_source=False,
                                cpu=1, memory=1024, timeout=60)(read_receipt)
