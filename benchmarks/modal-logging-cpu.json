@@ -1,0 +1,60 @@
+{
+  "kind": "CPU verification of the instrumented Modal runtime; no GPU allocation",
+  "verified_utc": "2026-11-02T17:33:51.738125+00:00",
+  "runtime_revision": "42bd208f3d1a8f5f7d9a694b89ed8ccf2815748f",
+  "modal_image_id": "im-I3803PnBXDsZwZTg3DdYL7",
+  "parent_image_id": "im-1uRsQ0NES8BmdMyIrsoQSR",
+  "parent_runtime_revision": "877a4f4466533c0f0879a65ba565a7803afe00f5",
+  "existing_environment_reused": true,
+  "installed_package_count": 297,
+  "constraint_mismatches": [],
+  "data_fingerprint": "91c2fe70efad772c",
+  "model": "Qwen/Qwen3.5-4B",
+  "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+  "model_weight_bytes": 9319828096,
+  "instrumentation": {
+    "source_before_sha256": "7d032c2447ef4058a28256e1806ce648b3380bd438a4ccff6534f58b069d0d24",
+    "source_after_sha256": "097e78476a02d8b75495b9cec9fbb455a63d4786aed166af1b9dc6d938f8a872",
+    "helper_sha256": "870bc82ffa016d62eda082d30c5f984fede4a46c7c3bb20d4e1826179ab904bf",
+    "search_before_sha256": "211f55023a59723f6b46213b21e38abbdea0f71ca7bce8ae19829d16bdfe3a57",
+    "search_after_sha256": "e51a0c9ddbce719fe2d6d28558443edc051e72508a2447347127e4d40e598bbb",
+    "backup": "/opt/whale-work/logging-source-backups/agent_loop-7d032c2447ef.py",
+    "behavior": "task-completion callbacks; gather ordering retained"
+  },
+  "linux_unit_tests_passed": 47,
+  "five_arm_mock_checks_passed": 56,
+  "persistent_mock_cycles_passed": 2,
+  "saved_image_check": {
+    "saved_image_reopened": true,
+    "cpu_logging_snapshot_valid": true,
+    "gpu_validated": false,
+    "simulation": {
+      "simulated_search_counter": {
+        "batch_sequence": 1,
+        "validation": true,
+        "global_step": null,
+        "batch_total": 32,
+        "expected_workers": 1,
+        "available": true,
+        "workers_reporting": 1,
+        "completed": 32,
+        "failed": 0,
+        "cancelled": 0,
+        "all_finished": true,
+        "updated_utc": "2026-11-02T17:32:24.600936+00:00",
+        "oldest_worker_update_utc": "2026-11-02T17:32:24.600936+00:00"
+      },
+      "original_order_preserved": true
+    }
+  },
+  "raw_receipt_sha256": "edafa9a08691e7f2a1af54239cb828ef0f0f016658a8893ac97f5f7640c4010a",
+  "gpu_requested": false,
+  "gpu_validated": false,
+  "kernel_setup_deferred_to_gpu": true,
+  "raw_evidence": ".candidate-control/modal-gpu-20261102",
+  "limitations": [
+    "The 32-attempt installed-counter check used simulated puzzle work with no model calls.",
+    "Real GPU model generation, training updates, checkpoint reload and the final test remain pending.",
+    "The earlier stopped GPU attempt is recorded separately in modal-validation-attempt-a.json."
+  ]
+}
