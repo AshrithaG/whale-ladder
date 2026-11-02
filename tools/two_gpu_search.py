@@ -1,8 +1,17 @@
 """Two-H100 candidate scoring and sleep/wake search runner.
 
-Uses a completed solver checkpoint and a fixed local 4B proposer. The optional
+Uses a completed solver checkpoint and the arm's proposer. The optional
 benchmark replays saved candidates before two real search iterations.
 Owned subprocesses are cleaned up; the allocation is never signalled.
+
+Proposer rungs (PROPOSER_BACKEND / PROPOSER_MODEL_PATH from ladder/arm_env.sh):
+  local  a vLLM proposer server; "@checkpoint" means the solver checkpoint
+         being searched (the self rung). With two solver replicas it shares
+         GPU 1 with solver 1 through sleep/wake.
+  api    no local proposer server (DeepSeek through LiteLLM); both solver
+         replicas stay awake the whole phase.
+LADDER_SOLVER_REPLICAS=1 keeps a single solver replica (the 4090 mini run);
+LADDER_SHARE_ONE_GPU=1 places every server on the one assigned GPU.
 """
 import copy
 import hashlib
@@ -17,6 +26,7 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+import ladder_prompt
 from switch_router import BackendPool, start_router
 
 
@@ -28,11 +38,21 @@ class Experiment:
         self.launch_counts = {}
         self.lock = threading.Lock()
         self.gpus = os.environ['LADDER_JOB_GPUS'].split(',')
+        if os.environ.get('LADDER_SHARE_ONE_GPU') == '1':
+            assert len(self.gpus) == 1, self.gpus
+            self.gpus = self.gpus * 2
         assert len(self.gpus) == 2, self.gpus
+        self.replicas = int(os.environ.get('LADDER_SOLVER_REPLICAS', '2'))
+        assert self.replicas in (1, 2), self.replicas
+        self.local_proposer = os.environ.get('PROPOSER_BACKEND', 'local') == 'local'
+        # Sleep/wake is needed only when solver 1 and the proposer share GPU 1.
+        self.switching = self.local_proposer and self.replicas == 2
+        self.proposals = int(os.environ.get('PROPOSALS_PER_ITER', '3'))
+        self.limit = int(os.environ.get('LADDER_MH_LIMIT', '256'))
         base = int(os.environ['SOLVER_PORT'])
         self.ports = {'solver0': base + 3, 'solver1': base + 4,
                       'proposer': int(os.environ['PROPOSER_PORT'])}
-        self.pool = BackendPool([self.url('solver0'), self.url('solver1')])
+        self.pool = BackendPool([self.url('solver0'), self.url('solver1')][:self.replicas])
         self.checkpoint = Path(os.environ['SWITCH_CHECKPOINT']) / 'hf'
         assert (self.checkpoint / '.merge_complete').exists()
         self.reference = Path(os.environ['SWITCH_REFERENCE_RUN']) if os.environ.get('SWITCH_REFERENCE_RUN') else None
@@ -82,11 +102,15 @@ class Experiment:
         assert name not in self.processes
         proposer = name == 'proposer'
         model = os.environ['PROPOSER_MODEL_PATH'] if proposer else str(self.checkpoint)
+        if model == '@checkpoint':
+            model = str(self.checkpoint)
         served = 'proposer' if proposer else os.environ['SOLVER_SERVED_NAME']
+        utilization = os.environ.get('PROPOSER_GPU_UTIL' if proposer else 'SOLVER_GPU_UTIL', '0.75')
         cmd = ['vllm', 'serve', model, '--host', '127.0.0.1', '--port', str(self.ports[name]),
                '--served-model-name', served, '--tensor-parallel-size', '1',
-               '--gpu-memory-utilization', '0.75', '--enable-sleep-mode',
-               '--max-model-len', os.environ.get('PROPOSER_MAX_MODEL_LEN', '131072') if proposer else '32768',
+               '--gpu-memory-utilization', utilization, '--enable-sleep-mode',
+               '--max-model-len', os.environ.get('PROPOSER_MAX_MODEL_LEN', '131072') if proposer
+               else os.environ.get('SOLVER_MAX_MODEL_LEN', '32768'),
                '--enable-prefix-caching', '--trust-remote-code', '--gdn-prefill-backend', 'triton']
         if proposer:
             cmd += ['--enable-auto-tool-choice', '--tool-call-parser', os.environ.get('TOOL_CALL_PARSER', 'qwen3_coder'),
@@ -153,6 +177,11 @@ class Experiment:
 
     def to_scoring(self, mode):
         started = time.monotonic()
+        # Objects built without __init__ (unit tests) keep the H100 behaviour.
+        if not getattr(self, 'switching', True):
+            self.pool.enable(list(range(self.replicas)))
+            self.event('transition_to_scoring', mode='none', seconds=time.monotonic()-started)
+            return
         if mode == 'restart':
             self.stop('proposer')
             self.start('solver1')
@@ -165,6 +194,9 @@ class Experiment:
 
     def to_proposing(self, mode):
         started = time.monotonic()
+        if not getattr(self, 'switching', True):
+            self.event('transition_to_proposing', mode='none', seconds=time.monotonic()-started)
+            return
         self.pool.drain(1)
         if mode == 'restart':
             self.stop('solver1')
@@ -179,7 +211,7 @@ class Experiment:
         while not self.stop_monitor.wait(5):
             record = dict(time=time.time(), phase=self.phase, router=self.pool.snapshot())
             try:
-                record['gpu'] = subprocess.check_output(['nvidia-smi', '-i', ','.join(self.gpus),
+                record['gpu'] = subprocess.check_output(['nvidia-smi', '-i', ','.join(dict.fromkeys(self.gpus)),
                     '--query-gpu=index,uuid,memory.used,utilization.gpu', '--format=csv,noheader,nounits'],
                     text=True, timeout=5)
                 for name in ('solver0', 'solver1'):
@@ -199,7 +231,7 @@ class Experiment:
             values = list(Path(logs).glob(f'*/{name}/*/val.json'))
             assert len(values) == 1, (name, values)
             value = json.loads(values[0].read_text())
-            assert value['num_examples'] == 256
+            assert value['num_examples'] == self.limit, (value['num_examples'], self.limit)
             assert value['metadata']['assistant_token_budget'] == 8129
 
     def score(self, sweep, config, harnesses, logs, overlap=False, mode='sleep'):
@@ -224,7 +256,7 @@ class Experiment:
                 transition.result()
         after = self.pool.snapshot()
         assert after['failed'] == before['failed'], 'Solver HTTP request failure'
-        assert all(after['completed'][i] > before['completed'][i] for i in (0, 1)), 'Both GPUs must serve requests'
+        assert all(after['completed'][i] > before['completed'][i] for i in range(self.replicas)), 'Every solver replica must serve requests'
         self.check_model('solver0')
         self.event('scoring_with_transition', seconds=time.monotonic()-started, mode=mode,
                    overlap=overlap, before=before, after=after)
@@ -234,23 +266,28 @@ class Experiment:
 
     def run_search(self, iterations=1):
         from meta_harness import meta_harness_chess_puzzle as mh
-        self.status('search: initialize solver replicas and fixed proposer')
+        self.status(f'search: initialize {self.replicas} solver replica(s), proposer={os.environ.get("PROPOSER_BACKEND", "local")}')
         self.start('solver0')
-        self.start('proposer')
         self.check_model('solver0')
-        self.check_model('proposer')
+        if self.local_proposer:
+            self.start('proposer')
+            self.check_model('proposer')
         threading.Thread(target=self.monitor, daemon=True).start()
-        self.sleep('proposer')
-        self.start('solver1')
-        self.check_model('solver1')
-        self.sleep('solver1')
-        self.wake('proposer')
+        if self.switching:
+            self.sleep('proposer')
+            self.start('solver1')
+            self.check_model('solver1')
+            self.sleep('solver1')
+            self.wake('proposer')
+        elif self.replicas == 2:
+            self.start('solver1')
+            self.check_model('solver1')
         pids = {name: proc.pid for name, proc in self.processes.items()}
-        self.real_search(mh, iterations=iterations, baseline_two_gpu=True)
+        outcome = self.real_search(mh, iterations=iterations, baseline_two_gpu=True)
         assert all(self.processes[name].pid == pid for name, pid in pids.items())
         (self.out/'passed.json').write_text(json.dumps(dict(passed=True,
-            search_iterations=iterations, candidates=3*iterations,
-            puzzles_per_candidate=256, server_pids=pids), indent=2)+'\n')
+            search_iterations=iterations, candidates_requested=self.proposals*iterations,
+            puzzles_per_candidate=self.limit, server_pids=pids, **outcome), indent=2)+'\n')
         self.status('search passed; allocation retained')
 
     def run(self):
@@ -310,18 +347,13 @@ class Experiment:
                 time.sleep(2)
         run_name = os.environ.get('LADDER_CYCLE_SEARCH_NAME') or 'mh-switch-'+os.environ['SLURM_JOB_ID']+'-'+self.out.name
         sys.argv = [sys.argv[0], '--run-name',run_name,'--config',os.environ['SWITCH_CONFIG'],
-            '--iterations',str(iterations),'--proposals-per-iter','3','--proposer-model','ladder-proposer',
-            '--proposer-effort','','--propose-timeout','1200']
+            '--iterations',str(iterations),'--proposals-per-iter',str(self.proposals),'--proposer-model','ladder-proposer',
+            '--proposer-effort','','--propose-timeout',os.environ.get('PROPOSER_TIMEOUT','1200')]
         args = mh.parse_args()
         run_dir = mh.get_run_dir(run_name).resolve()
         (self.out/'harness-run-dir').write_text(str(run_dir)+'\n')
-        original_prompt, sweep = mh.render_task_prompt, mh.run_sweep
-        mh.render_task_prompt = lambda iteration, names: (
-            f'Your actual working directory is {run_dir}. Use relative paths from here. '
-            'Write valid Python without backslash-escaped identifiers. '
-            'Harness code must not import sys or modify sys.path. Allowed imports are '
-            '__future__, collections, itertools, math, random, re, statistics.\n'+original_prompt(iteration,names))
-        mh.PROPOSER_SYSTEM_PROMPT += f' Your working directory is exactly {run_dir}.'
+        sweep = mh.run_sweep
+        ladder_prompt.install(mh, run_dir)
         mh.PROMPT_ONLY = False
         def wrapped(config, harnesses, logs_dir, *, force=False):
             config = copy.deepcopy(config)
@@ -338,11 +370,20 @@ class Experiment:
             return self.score(sweep,config,harnesses,logs_dir,overlap=False)
         mh.run_sweep = wrapped
         mh.run_evolve(args)
-        rows = [json.loads(x) for x in (run_dir/'logs/evolution_summary.jsonl').read_text().splitlines()]
+        summary = run_dir/'logs/evolution_summary.jsonl'
+        rows = [json.loads(x) for x in summary.read_text().splitlines()] if summary.exists() else []
         names = {r['harness'] for r in rows if r.get('status')=='evaluated'}
-        assert names == {f'h{i}' for i in range(1,3*iterations+1)}, names
+        expected = {f'h{i}' for i in range(1, self.proposals*iterations+1)}
+        assert names <= expected, (names, expected)
         self.validate_scores(run_dir/'logs', names)
-        # Invalid generated code fails visibly. No unrecorded repair or retries.
+        # Invalid proposals are skipped and recorded by WHALE's patched loop
+        # (patches/candidate-validation.patch); nothing is repaired or retried.
+        invalid = [r for r in rows if str(r.get('status', '')).startswith('rejected')]
+        outcome = dict(candidates_evaluated=len(names), candidates_rejected=len(invalid),
+                       rejected_reasons=[r.get('reason', '') for r in invalid],
+                       accepted_harness=(run_dir/'logs/accepted_harness.txt').read_text().strip())
+        self.event('search_outcome', **outcome)
+        return outcome
 
     def close(self):
         self.stop_monitor.set()

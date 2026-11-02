@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 # Two GPUs share generation and FSDP2 training. Isolated validation only.
+#
+# Defaults are the H100 run (2 GPUs, 256 puzzles x 8 attempts per step). Every
+# size can be overridden from the environment, which ladder/profiles/ use for
+# the 4090 mini run and the CPU mock run:
+#   HYBRID_NUM_GPUS (2), HYBRID_TRAIN_BATCH (256), HYBRID_ROLLOUT_N (8),
+#   HYBRID_VAL_PUZZLES (16), HYBRID_VAL_ROLLOUT_N (2), HYBRID_EVAL_PUZZLES (256),
+#   HYBRID_EVAL_ATTEMPTS (8), HYBRID_ALLOW_ZERO_ACCEPTED (0),
+#   LADDER_TRAIN_LAUNCHER (the prepared verl launcher), LADDER_ALLOW_NO_SLURM (0).
 set -euo pipefail
 test_dir="${1:?output directory required}"
 mkdir -p "$test_dir"
@@ -7,7 +15,7 @@ test_dir="$(cd "$test_dir" && pwd)"
 dry_run="${2:-}"
 mode="${HYBRID_MODE:-train}"
 training_steps="${HYBRID_TRAINING_STEPS:-2}"
-[[ "$training_steps" =~ ^[12]$ ]] || { echo 'Hybrid smoke requires one or two training steps' >&2; exit 2; }
+[[ "$training_steps" =~ ^[1-9][0-9]?$ ]] || { echo 'HYBRID_TRAINING_STEPS must be 1-99' >&2; exit 2; }
 start_step=0
 if [[ "$mode" == train && -n "${HYBRID_RESUME_CHECKPOINT:-}" ]]; then
   [[ "$HYBRID_RESUME_CHECKPOINT" =~ /global_step_([0-9]+)$ ]] || { echo 'Invalid resume checkpoint path' >&2; exit 2; }
@@ -17,30 +25,34 @@ if [[ "$mode" == train && -n "${HYBRID_RESUME_CHECKPOINT:-}" ]]; then
 fi
 target_step=$((start_step+training_steps))
 case "$mode" in train|eval) ;; *) echo 'HYBRID_MODE must be train or eval' >&2; exit 2 ;; esac
-export ARM=rsft_only PROFILE=smoke LADDER_NUM_GPUS=2
+num_gpus="${HYBRID_NUM_GPUS:-2}"
+# Training is the same for every arm, so its environment is always rsft_only's.
+export ARM=rsft_only PROFILE="${PROFILE:-smoke}" LADDER_NUM_GPUS="$num_gpus"
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/arm_env.sh"
-[[ -n "${SLURM_JOB_ID:-}" ]] || { echo 'Use an existing Slurm allocation' >&2; exit 2; }
-[[ "$(job_gpus 0,1)" == "$LADDER_JOB_GPUS" ]] || { echo 'Exactly two assigned GPUs are required' >&2; exit 2; }
-export RUN_NAME="${HYBRID_RUN_NAME:-hybrid-check-j${SLURM_JOB_ID:?}}"
+[[ -n "${SLURM_JOB_ID:-}" || "${LADDER_ALLOW_NO_SLURM:-0}" == 1 ]] || { echo 'Use an existing Slurm allocation' >&2; exit 2; }
+job_tag="${SLURM_JOB_ID:-local$$}"
+[[ "$(job_gpus "$(seq -s, 0 $((num_gpus - 1)))")" == "$LADDER_JOB_GPUS" ]] || { echo "Exactly $num_gpus assigned GPU(s) are required" >&2; exit 2; }
+export RUN_NAME="${HYBRID_RUN_NAME:-hybrid-check-j$job_tag}"
 [[ "$RUN_NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid hybrid run name' >&2; exit 2; }
 export RUN_OUT="$test_dir" OUTPUT_ROOT="$test_dir/checkpoints"
 export PROJECT_DIR="$DOMAIN_DIR"
-export RAY_TMPDIR="/tmp/ray-${USER}-${SLURM_JOB_ID}-hy"
-export N_GPUS_PER_NODE=2 NNODES=1 ROLLOUT_GPUS_PER_NODE=2 ROLLOUT_NNODES=1
-export TRAIN_BATCH_SIZE=256 PPO_MINI_BATCH_SIZE=256 ROLLOUT_N=8 VAL_ROLLOUT_N=2
-validation_puzzles=16
+export RAY_TMPDIR="/tmp/ray-${USER}-${job_tag}-hy"
+export N_GPUS_PER_NODE="$num_gpus" NNODES=1 ROLLOUT_GPUS_PER_NODE="$num_gpus" ROLLOUT_NNODES=1
+export TRAIN_BATCH_SIZE="${HYBRID_TRAIN_BATCH:-256}" ROLLOUT_N="${HYBRID_ROLLOUT_N:-8}" VAL_ROLLOUT_N="${HYBRID_VAL_ROLLOUT_N:-2}"
+export PPO_MINI_BATCH_SIZE="$TRAIN_BATCH_SIZE"
+validation_puzzles="${HYBRID_VAL_PUZZLES:-16}"
 if [[ "$mode" == eval ]]; then
   : "${HYBRID_SOURCE_CHECKPOINT:?evaluation requires a checkpoint}"
-  validation_puzzles=256
+  validation_puzzles="${HYBRID_EVAL_PUZZLES:-256}"
   [[ "$HYBRID_SOURCE_CHECKPOINT" =~ /global_step_([0-9]+)$ ]] || { echo "Invalid evaluation checkpoint" >&2; exit 2; }
   export HYBRID_EVAL_STEP="${BASH_REMATCH[1]}"
-  export VAL_ROLLOUT_N=8
+  export VAL_ROLLOUT_N="${HYBRID_EVAL_ATTEMPTS:-8}"
 fi
 export CHESS_PUZZLE_ALGO=rsft ENABLE_ONLINE_RSFT=true
 # update_sft_policy receives a shard and interprets this field per worker.
-# Keep the global SFT minibatch at 64 across the two data-parallel workers.
-export RSFT_SFT_EPOCHS=1 RSFT_SFT_MINI_BATCH_SIZE=32 RSFT_SFT_MICRO_PER_GPU=1
+# Keep the global SFT minibatch at 64 across the data-parallel workers.
+export RSFT_SFT_EPOCHS=1 RSFT_SFT_MINI_BATCH_SIZE=$((64 / num_gpus)) RSFT_SFT_MICRO_PER_GPU=1
 export TRAINER_SAVE_FREQ=1 TRAINER_TEST_FREQ=1 TRAINER_TOTAL_EPOCHS=1 TRAINER_VAL_BEFORE_TRAIN=False
 export FSDP_STRATEGY=fsdp2 FSDP_NATIVE_CPU_OFFLOAD=True
 export FSDP_PARAM_OFFLOAD=False FSDP_OPTIM_OFFLOAD=False USE_KL_LOSS=False
@@ -58,6 +70,7 @@ if [[ -f "$VERL_FILE_LOGGER_PATH" && "$dry_run" != --dry-run ]]; then
 fi
 python "$LADDER_HOME/setup/prepare_hybrid_launcher.py" "$DOMAIN_DIR" "$test_dir/launcher"
 export LADDER_HYBRID_PREAMBLE="$test_dir/launcher/preamble_hybrid.py"
+launcher="${LADDER_TRAIN_LAUNCHER:-$test_dir/launcher/train_hybrid.sh}"
 export VAL_FILES="$test_dir/validation-$validation_puzzles.parquet"
 python - "$DOMAIN_DIR/data/chess_puzzle/lichess_puzzles_test_256.parquet" "$VAL_FILES" "$validation_puzzles" <<'PY'
 import sys
@@ -83,7 +96,7 @@ if [[ "$mode" == eval ]]; then
          trainer.val_only=True trainer.val_before_train=True)
 fi
 if [[ "$dry_run" == --dry-run ]]; then
-  bash "$test_dir/launcher/train_hybrid.sh" "${args[@]}" --cfg job > "$test_dir/composed-config.log" 2>&1
+  bash "$launcher" "${args[@]}" --cfg job > "$test_dir/composed-config.log" 2>&1
   echo 'Hybrid config composed; GPU execution is not yet validated.'
   exit 0
 fi
@@ -92,9 +105,11 @@ cleanup() {
 }
 trap cleanup EXIT
 wait_gpus_free 120
-echo "HYBRID CHECK START: mode=$mode; 2 GPUs; memory=$GPU_MEM_UTIL; backend=${HYBRID_GDN_PREFILL_BACKEND:-triton}; 2048 rollouts per full batch"
-timeout --signal=TERM --kill-after=60s "${HYBRID_TIMEOUT_S:-5400}s" bash "$test_dir/launcher/train_hybrid.sh" "${args[@]}" 2>&1 | tee "$test_dir/console.log"
+echo "HYBRID CHECK START: mode=$mode; $num_gpus GPU(s); memory=$GPU_MEM_UTIL; backend=${HYBRID_GDN_PREFILL_BACKEND:-triton}; $((TRAIN_BATCH_SIZE * ROLLOUT_N)) rollouts per full batch"
+timeout --signal=TERM --kill-after=60s "${HYBRID_TIMEOUT_S:-5400}s" bash "$launcher" "${args[@]}" 2>&1 | tee "$test_dir/console.log"
 export HYBRID_VALIDATION_START_STEP="$start_step"
+export HYBRID_EXPECT_ROLLOUTS=$((TRAIN_BATCH_SIZE * ROLLOUT_N))
+export HYBRID_EXPECT_VAL=$((validation_puzzles * VAL_ROLLOUT_N))
 python - "$VERL_FILE_LOGGER_PATH" "$OUTPUT_ROOT/$RUN_NAME" "$test_dir/passed.json" "$mode" "$training_steps" <<'PY'
 import json,sys
 from pathlib import Path
@@ -104,9 +119,10 @@ if sys.argv[4]=='eval':
     import os
     step=int(os.environ['HYBRID_EVAL_STEP'])
     samples=[json.loads(x) for x in (Path(sys.argv[2])/'val_rollouts'/f'{step}.jsonl').read_text().splitlines()]
-    assert len(samples)==2048
+    expected=int(os.environ.get('HYBRID_EXPECT_VAL','2048'))
+    assert len(samples)==expected, (len(samples), expected)
     assert any(k.startswith('val-core/') for m in steps.values() for k in m), 'No evaluation metrics'
-    Path(sys.argv[3]).write_text(json.dumps({'passed':True,'mode':'eval','validation_rollouts':2048,
+    Path(sys.argv[3]).write_text(json.dumps({'passed':True,'mode':'eval','validation_rollouts':expected,
         'output_characters':sum(len(x.get('output') or '') for x in samples),
         'assistant_tokens':sum(v for x in samples if isinstance((v:=x.get('assistant_generated_tokens_tokenized')),(int,float))),
         'metrics':steps},indent=2)+'\n')
@@ -117,17 +133,18 @@ start_step=int(os.environ.get('HYBRID_VALIDATION_START_STEP','0'))
 target_step=start_step+training_steps
 for step in range(start_step+1,target_step+1):
     m=steps[step]
-    assert m.get('online_rsft/total')==2048, 'Wrong rollout count'
-    assert m.get('online_rsft/accepted',0)>0 and m.get('actor/sft_updates',0)>0, 'No actual weight update'
+    assert m.get('online_rsft/total')==int(os.environ.get('HYBRID_EXPECT_ROLLOUTS','2048')), 'Wrong rollout count'
+    if os.environ.get('HYBRID_ALLOW_ZERO_ACCEPTED','0')!='1':
+        assert m.get('online_rsft/accepted',0)>0 and m.get('actor/sft_updates',0)>0, 'No actual weight update'
     assert m['actor/sft_updates']==(m['online_rsft/accepted']+63)//64, 'Wrong global SFT minibatch schedule'
     assert m.get('timing_s/update_weights',0)>0, 'No weight handoff'
-    assert len((Path(sys.argv[2])/'rollouts'/f'{step}.jsonl').read_text().splitlines())==2048
-assert len((Path(sys.argv[2])/'val_rollouts'/f'{target_step}.jsonl').read_text().splitlines())==32
+    assert len((Path(sys.argv[2])/'rollouts'/f'{step}.jsonl').read_text().splitlines())==int(os.environ.get('HYBRID_EXPECT_ROLLOUTS','2048'))
+assert len((Path(sys.argv[2])/'val_rollouts'/f'{target_step}.jsonl').read_text().splitlines())==int(os.environ.get('HYBRID_EXPECT_VAL','32'))
 assert any(k.startswith('val-core/') for k in steps[target_step]), 'No post-update validation'
-Path(sys.argv[3]).write_text(json.dumps({'passed':True,'steps':training_steps,'start_step':start_step,'target_step':target_step,'rollouts_per_step':2048,'metrics':steps},indent=2)+'\n')
+Path(sys.argv[3]).write_text(json.dumps({'passed':True,'steps':training_steps,'start_step':start_step,'target_step':target_step,'rollouts_per_step':int(os.environ.get('HYBRID_EXPECT_ROLLOUTS','2048')),'metrics':steps},indent=2)+'\n')
 PY
 if [[ "$mode" == eval ]]; then
-  echo 'HYBRID EVALUATION PASSED: 256 puzzles x 8 attempts'
+  echo "HYBRID EVALUATION PASSED: $validation_puzzles puzzles x $VAL_ROLLOUT_N attempts"
 else
   echo "HYBRID CHECK PASSED: $training_steps generation/update transitions plus post-update validation"
 fi

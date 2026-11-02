@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Fake `vllm serve` for the CPU mock run (ladder/mock_run.sh).
+
+Speaks the parts of vLLM's server the ladder uses: /v1/models,
+/v1/chat/completions, /sleep, /wake_up, /is_sleeping, /metrics, /health.
+
+As a solver it plays chess puzzles: mock puzzles (tests/mock/make_data.py) are
+solved by the alphabetically smallest legal move, and this server picks that
+move with a probability fixed by the harness's system prompt. Different
+candidate harnesses therefore score differently and deterministically, so the
+search's selection logic is exercised for real.
+"""
+import argparse
+import hashlib
+import json
+import os
+import random
+import re
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+
+LEGAL = re.compile(r"\[([a-h][1-8][a-h][1-8][qrbn]?)\]")
+
+
+def digest(text: str) -> int:
+    return int(hashlib.sha256(text.encode()).hexdigest()[:12], 16)
+
+
+def solver_reply(messages: list) -> str:
+    text = "\n".join(str(m.get("content", "")) for m in messages)
+    if "Reply with the word ready." in text:
+        return "ready"
+    legal = LEGAL.findall(str(messages[-1].get("content", ""))) or LEGAL.findall(text)
+    if not legal:
+        return "<move>e2e4</move>"
+    system = next((str(m.get("content", "")) for m in messages if m.get("role") == "system"), "")
+    skill = 0.15 + 0.6 * (digest(system) % 1000) / 1000.0
+    rng = random.Random(digest(json.dumps(messages, sort_keys=True)))
+    best = min(legal)
+    others = [m for m in legal if m != best]
+    move = best if (rng.random() < skill or not others) else rng.choice(others)
+    return f"<move>{move}</move>"
+
+
+def main() -> None:
+    if len(sys.argv) < 3 or sys.argv[1] != "serve":
+        sys.exit("mock vllm supports only: vllm serve MODEL [options]")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("model")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--served-model-name", default=None)
+    args, _ = ap.parse_known_args(sys.argv[2:])
+    served = args.served_model_name or args.model
+    state = {"sleeping": False, "requests": 0}
+    print(f"mock vllm: serving model={args.model} as served_name={served} on port {args.port}", flush=True)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def reply(self, code: int, body, ctype: str = "application/json") -> None:
+            raw = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            path = urlparse(self.path).path
+            if path == "/v1/models":
+                self.reply(200, {"object": "list", "data": [{"id": served, "object": "model"}]})
+            elif path == "/is_sleeping":
+                self.reply(200, {"is_sleeping": state["sleeping"]})
+            elif path == "/metrics":
+                lines = [
+                    'vllm:num_requests_running{model_name="%s"} 0' % served,
+                    'vllm:num_requests_waiting{model_name="%s"} 0' % served,
+                    'vllm:generation_tokens_total{model_name="%s"} %d' % (served, state["requests"] * 8),
+                    'vllm:kv_cache_usage_perc{model_name="%s"} 0.0' % served,
+                    'vllm:num_preemptions_total{model_name="%s"} 0' % served,
+                ]
+                self.reply(200, "\n".join(lines) + "\n", "text/plain")
+            elif path == "/health":
+                self.reply(200, "")
+            else:
+                self.reply(404, {"error": "not found"})
+
+        def do_POST(self):
+            path = urlparse(self.path).path
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            if path == "/sleep":
+                state["sleeping"] = True
+                self.reply(200, "")
+            elif path == "/wake_up":
+                state["sleeping"] = False
+                self.reply(200, "")
+            elif path == "/v1/chat/completions":
+                if state["sleeping"]:
+                    self.reply(503, {"error": "mock server is sleeping"})
+                    return
+                req = json.loads(body or b"{}")
+                state["requests"] += 1
+                content = solver_reply(req.get("messages", [])) if served != "proposer" else "ready"
+                self.reply(200, {
+                    "id": f"mock-{state['requests']}", "object": "chat.completion", "created": int(time.time()),
+                    "model": served,
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant", "content": content}}],
+                    "usage": {"prompt_tokens": 50, "completion_tokens": 8, "total_tokens": 58},
+                })
+            else:
+                self.reply(404, {"error": "not found"})
+
+    time.sleep(float(os.environ.get("MOCK_VLLM_STARTUP_S", "0.5")))
+    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

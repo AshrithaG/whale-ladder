@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Fake Claude Code CLI for the CPU mock run (ladder/mock_run.sh).
+
+Called by WHALE's claude_wrapper exactly like the real CLI (`claude -p PROMPT
+--output-format stream-json ...`, cwd = the search run directory). Instead of
+calling a model it writes candidate harnesses for the slots named in the prompt,
+following a scripted scenario, and prints the stream-json events the wrapper
+parses. Scenarios, chosen per call from MOCK_PROPOSER_PLAN_<RUNG> (comma list,
+cycled; RUNG = LADDER_RUNG upper-cased):
+
+  good              every slot gets a valid variant + a correct manifest
+  synonym           as good, but the manifest says "slot" instead of "name"
+  broken_python     the first slot is not valid Python
+  missing_function  the first slot lacks the required propose_action
+  wrong_slot        the manifest names a slot that was not assigned
+  garbage_manifest  valid harness files, manifest is not JSON
+  no_output         writes nothing, exits 0
+  crash             writes nothing, exits 1
+"""
+import json
+import os
+import re
+import sys
+import uuid
+from pathlib import Path
+
+
+def emit(event: dict) -> None:
+    print(json.dumps(event), flush=True)
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if "--version" in argv:
+        print("0.0.0 (mock claude)")
+        return
+    prompt = argv[argv.index("-p") + 1] if "-p" in argv else ""
+    cwd = Path.cwd()
+    slots = list(dict.fromkeys(re.findall(r"harnesses/([A-Za-z0-9_]+)/harness\.py", prompt)))
+    rung = os.environ.get("LADDER_RUNG", "none").upper()
+    plan = os.environ.get(f"MOCK_PROPOSER_PLAN_{rung}", os.environ.get("MOCK_PROPOSER_PLAN", "good")).split(",")
+    state = Path(os.environ.get("MOCK_STATE_DIR", cwd / "logs"))
+    state.mkdir(parents=True, exist_ok=True)
+    counter = state / f"claude-calls-{rung.lower()}"
+    calls = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(calls + 1))
+    scenario = plan[calls % len(plan)].strip()
+
+    accepted = (cwd / "logs" / "accepted_harness.txt").read_text().strip()
+    base = (cwd / "harnesses" / accepted / "harness.py").read_text()
+
+    def variant(slot: str) -> str:
+        tag = f"[mock {scenario} {slot} {uuid.uuid4().hex[:8]}] "
+        assert 'SYSTEM_PROMPT = """' in base, "mock expects WHALE's SYSTEM_PROMPT layout"
+        return base.replace('SYSTEM_PROMPT = """', 'SYSTEM_PROMPT = """' + tag, 1)
+
+    writes: dict[str, str] = {}
+    manifest = None
+    if scenario in ("good", "synonym", "broken_python", "missing_function", "wrong_slot", "garbage_manifest"):
+        for slot in slots:
+            writes[f"harnesses/{slot}/harness.py"] = variant(slot)
+        key = "slot" if scenario == "synonym" else "name"
+        entries = [{key: s, "axis": "A", "hypothesis": f"mock {scenario}", "changes": "prompt tag"} for s in slots]
+        if scenario == "broken_python" and slots:
+            writes[f"harnesses/{slots[0]}/harness.py"] = "def broken(:\n    pass\n"
+        if scenario == "missing_function" and slots:
+            writes[f"harnesses/{slots[0]}/harness.py"] = variant(slots[0]).replace(
+                "def propose_action(", "def propose_action_removed(")
+        if scenario == "wrong_slot" and entries:
+            entries[0]["name"] = "h999"
+        manifest = "{not json" if scenario == "garbage_manifest" else json.dumps({"candidates": entries}, indent=2)
+        writes["pending_eval.json"] = manifest
+    elif scenario not in ("no_output", "crash"):
+        sys.exit(f"mock claude: unknown scenario {scenario!r}")
+
+    blocks = []
+    for i, (rel, text) in enumerate(writes.items()):
+        path = cwd / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        blocks.append({"type": "tool_use", "id": f"toolu_mock_{i}", "name": "Write",
+                       "input": {"file_path": str(path), "content": text}})
+    usage = {"input_tokens": 20000, "output_tokens": 1500}
+    emit({"type": "system", "subtype": "init", "session_id": f"mock-{calls}", "model": "mock"})
+    emit({"type": "assistant", "message": {
+        "content": [{"type": "text", "text": f"mock proposer scenario {scenario}, slots {slots}"}] + blocks,
+        "usage": usage}})
+    if blocks:
+        emit({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": b["id"], "content": "ok", "is_error": False} for b in blocks]}})
+    emit({"type": "result", "subtype": "success" if scenario != "crash" else "error",
+          "session_id": f"mock-{calls}", "total_cost_usd": 0.0, "usage": usage})
+    if scenario == "crash":
+        print("mock proposer crash", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
