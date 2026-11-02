@@ -81,11 +81,11 @@ can be reused as inputs while Python packages and patched WHALE remain
 separate from the historical installation:
 
 ```bash
-export LADDER_ROOT=/absolute/path/to/new-candidate-work
-export LADDER_MODEL_CACHE=/absolute/path/to/existing/hf
-export CHESS_DATA_FROM=/absolute/path/to/shared/parquet-files
-export CHESS_DATA_FINGERPRINT=<shared-dataset-fingerprint>
-sbatch -A YOUR_ACCOUNT slurm/candidate_setup.sbatch
+python3 tools/submit_candidate.py --account YOUR_ACCOUNT \
+  --root /absolute/path/to/new-candidate-work \
+  --model-cache /absolute/path/to/existing/hf \
+  --data-from /absolute/path/to/shared/parquet-files \
+  --fingerprint SHARED_DATASET_FINGERPRINT
 ```
 
 The CPU setup job selects Python 3.11.18, Claude Code 2.1.197 and the captured
@@ -94,13 +94,22 @@ Linux/CUDA-13 dependency constraints in
 working PSC environment, which passed `pip check`; a clean constrained install
 is still a required validation. CPU setup defers GPU kernel checks.
 
-After setup succeeds, submit `slurm/candidate_validate.sbatch` with the same
-environment (or use Slurm's `afterok:<setup-job-id>` dependency). It requests
-two H100s for four hours, checks GPU kernels and preflight, then runs the two
+The submitter writes `job-config.json` with the paths/revision and passes it
+as a positional argument to both jobs, so startup does not depend on custom
+variables surviving Slurm's environment export. `latest-submission.json`
+records both job IDs; an existing record prevents accidental duplicate
+submissions. `--setup-only` submits just the CPU job.
+
+GPU validation has an `afterok:<setup-job-id>` dependency. It requests two
+H100s for four hours, checks GPU kernels and preflight, then runs the two
 cycles and final test. Its control directory is
 `$LADDER_ROOT/jobs/candidate-<job-id>/`. Failure retains the allocation until
 wall time for diagnosis; creating `retry` in that directory requests another
-attempt. Success ends the batch job. It never cancels another job. Submit
+attempt. Success also retains the allocation for inspection/further work.
+The allocation owner launches the worker in a separate `srun` step; early
+configuration errors are caught by its exit guard. Slurm deadlines, node
+failure, preemption or a job-level kill can still end an allocation. It never
+cancels another job. Submit
 from a clean checkout: validation requires the prepared and running code
 revisions to match.
 

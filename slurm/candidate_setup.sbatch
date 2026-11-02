@@ -1,10 +1,8 @@
 #!/bin/bash -l
 # CPU preparation for the isolated PSC installation. Submit from the checkout:
-#   export LADDER_ROOT=/absolute/new/candidate-work
-#   export LADDER_MODEL_CACHE=/absolute/existing/hf       # optional
-#   export CHESS_DATA_FROM=/absolute/shared/parquet-dir  # recommended
-#   export CHESS_DATA_FINGERPRINT=<shared fingerprint>
-#   sbatch -A YOUR_ACCOUNT slurm/candidate_setup.sbatch
+#   python3 tools/submit_candidate.py --account YOUR_ACCOUNT \
+#     --root /absolute/new/candidate-work --setup-only
+# The submitter passes an explicit JSON config path as the script argument.
 #SBATCH --job-name=ladder-setup
 #SBATCH --partition=RM-shared
 #SBATCH --qos=low
@@ -13,10 +11,14 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=7600M
 #SBATCH --time=01:00:00
+#SBATCH --export=ALL
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?}"
-: "${LADDER_ROOT:?Use a separate candidate installation root}"
+exports="$(python3 setup/load_candidate_config.py "${1:?job configuration required}")"
+eval "$exports"
+cd "$LADDER_CODE_DIR"
 git diff --quiet && git diff --cached --quiet
+[[ "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" ]] || { echo 'Unexpected candidate revision' >&2; exit 2; }
 mkdir -p "$LADDER_ROOT"
 marker="$LADDER_ROOT/.candidate-install"
 if [[ ! -f "$marker" && ( -e "$LADDER_ROOT/venv" || -e "$LADDER_ROOT/WHALE" ) ]]; then

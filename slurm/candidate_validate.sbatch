@@ -1,6 +1,6 @@
 #!/bin/bash -l
-# Submit after candidate_setup.sbatch succeeds, from the same clean checkout
-# and with the same LADDER_ROOT/model-cache/data settings.
+# Allocation owner: setup and experiment failures remain inside an srun child.
+# Keep the allocation after success, worker failure, or bootstrap errors.
 #SBATCH --job-name=ladder-persist
 #SBATCH --partition=GPU-shared
 #SBATCH --qos=gpu
@@ -10,36 +10,42 @@
 #SBATCH --mem=256G
 #SBATCH --gres=gpu:h100-80:2
 #SBATCH --time=04:00:00
-set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:?}"
-: "${LADDER_ROOT:?Use the isolated candidate installation root}"
-git diff --quiet && git diff --cached --quiet
-[[ "$(cat "$LADDER_ROOT/installed-revision")" == "$(git rev-parse HEAD)" ]] || {
-  echo 'Code differs from the prepared installation; rerun candidate_setup.sbatch' >&2; exit 2;
+#SBATCH --export=ALL
+set +e
+set -uo pipefail
+repo="${SLURM_SUBMIT_DIR:-$PWD}"
+config="${1:-}"
+parent="${config:+$(dirname "$config")}"
+parent="${parent:-$repo/.candidate-control}"
+control="$parent/jobs/candidate-${SLURM_JOB_ID:-local}"
+mkdir -p "$control" || control="$(mktemp -d /tmp/ladder-control-XXXXXX)"
+hold() {
+  local result="$1"
+  printf 'exit=%s; allocation retained; control=%s; create retry after diagnosis\n' "$result" "$control" | tee "$control/status"
+  while [[ ! -f "$control/retry" ]]; do sleep 15; done
+  mv "$control/retry" "$control/retry-$(date -u +%Y%m%dT%H%M%SZ)"
 }
-export LADDER_GCC_MODULE="${LADDER_GCC_MODULE:-gcc/13.3.1-p20240614}"
-export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
-export INSTALL_PROFILE=persistent-smoke
-control="$LADDER_ROOT/jobs/candidate-$SLURM_JOB_ID"
-mkdir -p "$control"
-git rev-parse HEAD > "$control/revision"
-validate() {
-  printf 'GPU kernels and preflight\n' > "$control/status"
-  bash setup/install_gpu_kernels.sh || return $?
-  bash setup/preflight.sh whale_qwen4b persistent-smoke || return $?
-  printf 'Two persistent training/search cycles and final test\n' > "$control/status"
-  bash ladder/run_cycles.sh whale_qwen4b persistent-smoke || return $?
+bootstrap_failure() {
+  local result=$?
+  trap - EXIT
+  hold "$result"
+  exec bash "$repo/slurm/candidate_validate.sbatch" "$config"
 }
+trap bootstrap_failure EXIT
+trap 'trap - EXIT; exit 143' TERM
+trap 'trap - EXIT; exit 130' INT
+[[ -n "$config" && -r "$config" ]] || { echo 'Missing explicit job configuration' >&2; exit 2; }
+cd "$repo" || exit 2
 while true; do
-  if validate > "$control/attempt-$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1; then
-    printf 'PASSED: two cycles and final test\n' > "$control/status"
-    break
+  attempt="$control/attempt-$(date -u +%Y%m%dT%H%M%SZ).log"
+  printf 'RUNNING: %s\n' "$attempt" > "$control/status"
+  if srun --unbuffered --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-24}" \
+      --gpus=h100-80:2 --export=ALL bash "$repo/ladder/validate_candidate.sh" "$config" > "$attempt" 2>&1; then
+    printf 'PASSED: worker completed\n' >> "$attempt"
+    result=0
   else
     result=$?
-    printf 'FAILED exit=%s; allocation retained for inspection. Create %s/retry to retry.\n' "$result" "$control" > "$control/status"
-    # Batch jobs survive laptop disconnections. Waiting here preserves the
-    # allocation for diagnosis, bounded by its normal four-hour wall time.
-    while [[ ! -f "$control/retry" ]]; do sleep 15; done
-    mv "$control/retry" "$control/retry-$(date -u +%Y%m%dT%H%M%SZ)"
+    printf 'FAILED: worker exit=%s\n' "$result" >> "$attempt"
   fi
+  hold "$result"
 done

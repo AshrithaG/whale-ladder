@@ -2,7 +2,7 @@
   "kind": "CPU orchestration validation; all models/training/APIs simulated",
   "validated_on": "2026-11-02",
   "base_pr4": "8bd6d6aee47055c979dfc238b19f1454796d763e",
-  "unit_tests_passed": 28,
+  "unit_tests_passed": 32,
   "pr4_mock_checks_passed": 56,
   "persistent_cycles_passed": 2,
   "same_model_server_pids_across_cycles": true,
@@ -36,5 +36,11 @@
     "ladder/run_cycles.sh": "91bc1b5a8209b0d22fa75a5843828820523b7f84a765c8d525bb4f07fb08e7bd",
     "ladder/hybrid_test.sh": "81cf45971ec87a0df7ee70cdfd50b3a51a8166c0bd77659d4760e75339b4b5ad",
     "patches/candidate-validation.patch": "82b0bbad88897181624fb24ce0ba261e869d0e41c38170208428549e26cf3782"
-  }
+  },
+  "allocation_controller_cpu_checks": [
+    "missing startup configuration holds the controller",
+    "worker failure holds without automatic retries",
+    "worker success also holds",
+    "explicit configuration quotes paths safely"
+  ]
 }
