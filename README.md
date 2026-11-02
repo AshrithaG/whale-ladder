@@ -76,14 +76,26 @@ Move right only when the current layer passes; details and commands are in the t
 
 ## Candidate: persistent two-GPU validation
 
-This branch builds on PR4 (and therefore PRs 1–3). The optional
-`persistent-smoke` profile adds the search-server persistence used in the PSC
-development trials. It supports **two H100s and the fixed base-4B proposer**;
-the ordinary runner remains available for the other arms. The isolated PSC
-CPU installation passed, with installed package versions matching the captured
-constraints. Real GPU validation of this combined candidate is pending. CPU
-installation and simulations do not establish GPU memory fit, kernel
-compatibility, model quality, or a research result.
+PRs 1–4 are merged into `main`. The optional `persistent-smoke` profile adds
+search-server persistence to that shared runner. It supports **two H100s and
+the fixed base-4B proposer**; the ordinary `h100` runner remains available for
+all arms and does not enable cross-cycle persistence by default.
+
+The [November 2 PSC trial](benchmarks/psc-validation-20261102.json) completed
+cycle 1 with real models: 2,048 training rollouts, 89 accepted samples, two
+optimizer updates, a saved checkpoint and a full three-slot harness search.
+Cycle 2 generated all 2,048 rollouts with 291 positive scores, but the two-hour
+allocation expired during its weight update. No cycle 2 checkpoint was saved.
+**Full GPU validation remains incomplete:** checkpoint refresh into the same
+search servers, the second search and final evaluation have not been verified.
+Other proposer arms and the full research schedule need their own GPU checks.
+These partial results establish execution progress, not a research conclusion.
+
+For team use, start with a short run for the intended arm and the shared data
+fingerprint before committing the longer `h100` budget. Keep cross-cycle
+persistence opt-in until its full two-cycle validation passes. The PSC
+submitter below requests four hours; the interrupted trial reused an existing
+two-hour allocation and is not a measurement of a complete validation's runtime.
 
 ```bash
 bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
@@ -331,6 +343,12 @@ completed puzzle rollouts. Missing worker snapshots or missing metrics mean
 unavailable observations, not zero work. A readiness check verifies logging
 before model startup; observation errors are recorded explicitly. No observer
 action restarts work or changes experiment decisions.
+The PSC validation wrapper marks completion only after all phases return
+normally; termination signals and phase failures write a failed status with a
+return code. A hard kill can prevent finalization, so check Slurm state and
+the phase/pass receipts alongside the last heartbeat. The interrupted November
+2 runtime incorrectly wrote `completed` on timeout; this branch fixes that
+finalization path, but does not rewrite the original trial's evidence.
 If the storage API returns a partially published live snapshot, the status
 reader falls back to the last complete telemetry-history row and shows its
 actual age. It never treats an unreadable snapshot as zero completed attempts.
