@@ -28,9 +28,8 @@ def audit_runtime(revision):
     env = dict(os.environ)
     env.pop('PYTHONPATH', None)
     env.pop('PYTHONHOME', None)
-    # Populate official matching kernel wheels on CPUs. Actual CUDA compilation,
-    # device execution and the actor probe still run in GPU preflight.
-    subprocess.run(['bash', str(code / 'setup/install_gpu_kernels.sh')], env=env, check=True)
+    # vLLM's kernel-download CLI performs CUDA device detection. Keep the
+    # existing installer in the GPU phase rather than faking a device on CPU.
     subprocess.run(['bash', '-euc', '''
 set -a
 source /opt/whale-ladder/ladder/config.env
@@ -76,7 +75,7 @@ def prepare(output, base_image=BASE_IMAGE):
                 parent_runtime_revision=result['parent_audit']['revision'],
                 logging_instrumentation=result['instrumentation'],
                 gpu_requested=False, gpu_validated=False,
-                note='Existing CPU installation reused; source updated and official kernel wheels added on CPU. GPU preflight remains required.')
+                note='Existing CPU installation reused; source updated and logging audited on CPU. Device-dependent kernel setup and GPU preflight remain required.')
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(record, indent=2) + '\n')
         print(f'CPU-verified logging image {record["modal_image_id"]}; receipt: {output}')

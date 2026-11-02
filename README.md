@@ -291,11 +291,12 @@ It does not claim to isolate GPU generation from reward checking. Full raw
 parameter-checksum responses are retained in `weight-checksums.jsonl`.
 
 The logging image is derived from the verified CPU image using an exact Git
-bundle from the local commit. It reuses the installed environment, installs
-official matching kernel wheels on CPUs, checks constraints/data/models, and
+bundle from the local commit. It reuses the installed environment, checks
+constraints/data/models and the logging entrypoint on CPUs, and
 preserves the parent CPU receipt. Its source revision and image ID are recorded
-separately from the parent `877a4f4` installation. Real kernel execution and
-the actor probe still require GPU preflight. The original image alone does not
+separately from the parent `877a4f4` installation. The existing kernel installer
+performs device detection and remains in the GPU phase, followed by the real
+actor probe. The original image alone does not
 contain these later logging changes.
 
 Modal's filesystem can report virtual free capacity (the first trial reported
