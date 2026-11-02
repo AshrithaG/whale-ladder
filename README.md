@@ -5,13 +5,72 @@ proposer swapped across a ladder of models, to test whether a small model can
 improve its own agent. Everything else (data, training, scoring, the Claude Code
 proposer scaffold and its skill files) stays as WHALE released it.
 
-| Arm | Proposer model | Where it runs |
+| Arm | Proposer model | Where the proposer runs |
 |---|---|---|
-| `rsft_only` | none (weight updates only, the baseline) | PSC |
+| `rsft_only` | none (weight updates only, the baseline) | no proposer |
 | `whale_deepseek` | DeepSeek Flash (strong) | provider API |
-| `whale_qwen27b` | Qwen3.8-27B (medium) | PSC, 2 of the 4 GPUs |
-| `whale_qwen4b` | Qwen3.5-4B base weights, frozen (weak) | PSC, 1 GPU |
-| `whale_self` | the checkpoint just trained (self-improvement) | PSC, 1 GPU |
+| `whale_qwen27b` | Qwen3.8-27B (medium) | GPU 1, taking turns with a solver |
+| `whale_qwen4b` | Qwen3.5-4B base weights, frozen (weak) | GPU 1, taking turns with a solver |
+| `whale_self` | the checkpoint just trained (self-improvement) | GPU 1, taking turns with a solver |
+
+## At a glance
+
+### One arm, start to finish
+
+```mermaid
+flowchart TD
+    S(["Start<br/>Qwen3.5-4B + WHALE's base harness h0"]) --> T
+
+    subgraph CYC ["One cycle: repeated CYCLES times (4 in the real runs)"]
+        T["<b>1. Train</b><br/>13 steps; each step = 256 puzzles x 8 attempts<br/>the model learns only from the attempts that solved the puzzle"]
+        T --> CK["Checkpoint saved<br/>and converted so vLLM can serve it"]
+        CK --> P
+
+        subgraph SRCH ["Harness search: repeated SEARCH_ITERS times (6)"]
+            P["<b>2. Propose</b><br/>the arm's proposer reads recent failures<br/>and writes 3 new harness files"]
+            P --> V{"<b>3. Valid?</b><br/>loads, has the required functions,<br/>uses an assigned slot"}
+            V -- no --> R["Rejected and logged<br/>(counts as a failed edit, never repaired)"]
+            V -- yes --> SC["<b>4. Score</b><br/>256 harness-search puzzles, 1 attempt each"]
+            SC --> A["<b>5. Accept</b><br/>the best harness scored so far,<br/>which can be the current one"]
+            R --> A
+        end
+    end
+
+    A --> Q{"More cycles?"}
+    Q -- "yes: train with the accepted harness" --> T
+    Q -- no --> F["<b>6. Final test</b><br/>256 held-out puzzles x 8 attempts<br/>last checkpoint + last accepted harness"]
+    F --> OUT(["results.json<br/>per-cycle scores, rejected edits with reasons, final test score"])
+```
+
+`rsft_only` runs steps 1 and 6 only (same training budget, no harness search),
+so it shows what training alone achieves.
+
+### What changes between arms
+
+Only **who writes the harnesses in step 2**. Everything else is identical for all five arms: the base model, the puzzles (data fingerprint `91c2fe70efad772c`), the schedule, the Claude Code proposer scaffold and prompt, the validation rule in step 3, and the scoring.
+
+### Where each step runs (2 H100s per arm)
+
+| Step | GPU 0 | GPU 1 |
+|---|---|---|
+| 1. Train | training + generating attempts (shared) | training + generating attempts (shared) |
+| 2. Propose | solver (idle) | proposer awake, second solver asleep |
+| 4. Score | solver | second solver awake, proposer asleep |
+
+Switching GPU 1 between proposer and solver takes about a second (vLLM sleep/wake). The DeepSeek arm needs no proposer GPU, so both solvers stay awake. On cerlab23's single 4090 (`mini4090`), one solver and the proposer share the GPU side by side.
+
+### How we know it works before spending GPU hours
+
+```mermaid
+flowchart LR
+    L1["<b>1. Mock run</b><br/>CPU, fakes<br/>minutes"] --> L2["<b>2. Proposer check</b><br/>4090<br/>minutes"]
+    L2 --> L3["<b>3. Replay B1 search</b><br/>4090<br/>~20 min"]
+    L3 --> L4["<b>4. Mini loop</b><br/>4090, 0.8B solver<br/>~1 h"]
+    L4 --> L5["<b>5. H100 check</b><br/>1 cycle, 1 step<br/>1 h"]
+    L5 --> L6["<b>6. Real runs</b><br/>all arms, sbatch<br/>days"]
+```
+
+Move right only when the current layer passes; details and commands are in the testing-ladder section below.
 
 ## Running an arm: one command
 
