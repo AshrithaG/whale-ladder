@@ -135,6 +135,26 @@ cancels another job. Submit
 from a clean checkout: validation requires the prepared and running code
 revisions to match.
 
+### CPU-only preparation on Modal
+
+With Python 3.14 and the `modal==1.6.3` client connected to your workspace,
+run from a clean, published checkout:
+
+```bash
+python tools/modal_candidate.py --data /path/to/the/shared/parquets \
+  --fingerprint SHARED_DATASET_FINGERPRINT --output /tmp/whale-ladder-modal-cpu.json
+```
+
+This verifies and uploads the three existing parquet files, builds a cached
+CUDA-13/Ubuntu image using the existing installer and package constraints,
+and caches the pinned 4B weights in a Modal Volume. All preparation functions
+use CPUs; no GPU function is defined or launched. CPU/memory and applicable
+storage charges still apply. The receipt records the image ID, code revision,
+package versions, compiler and dataset checks, and explicitly leaves GPU
+validation pending. The `modal-smoke` profile uses the same experiment as
+`persistent-smoke`, with the container's compiler replacing PSC modules.
+GPU execution is a separate step; this command does not run the experiment.
+
 ## Running an arm: one command
 
 `ladder/run_cycles.sh ARM PROFILE` runs one arm end to end on the two-GPU
