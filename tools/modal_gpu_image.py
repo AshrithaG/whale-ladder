@@ -62,8 +62,8 @@ def prepare(output, base_image=BASE_IMAGE):
         subprocess.run(['git', 'bundle', 'create', str(bundle), 'HEAD'], cwd=home, check=True)
         image = (modal.Image.from_id(base_image)
             .add_local_file(bundle, '/tmp/whale-runtime.bundle', copy=True)
-            .run_commands(['git', '-C', '/opt/whale-ladder', 'fetch', '/tmp/whale-runtime.bundle', 'HEAD'],
-                          ['git', '-C', '/opt/whale-ladder', 'checkout', '--detach', revision])
+            .run_commands('git -C /opt/whale-ladder fetch /tmp/whale-runtime.bundle HEAD',
+                          f'git -C /opt/whale-ladder checkout --detach {revision}')
             .run_function(audit_runtime, args=(revision,), cpu=4, memory=8192, timeout=900,
                           volumes={'/models': models}, include_source=False))
         app = modal.App('whale-ladder-logging-cpu')
