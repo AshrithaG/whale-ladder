@@ -1,22 +1,38 @@
 """Check that progress and timing reports preserve their measurement meanings."""
 import json
+import http.client
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'tools'))
 sys.path.insert(0,str(ROOT/'setup'))
-from observe_run import snapshot, parse_metrics
+from observe_run import snapshot, parse_metrics, inference_metrics
 from summarize_cycles import timing_report
 from ladder_rollout_progress import RolloutProgress
 from modal_gpu_status import describe, load_snapshot
 
 
 class ObservabilityTests(unittest.TestCase):
+    def test_non_http_port_does_not_hide_the_real_metrics_port(self):
+        proc=SimpleNamespace(pid=1,info={'name':'vLLMHttpServer'},
+            net_connections=lambda **_: [SimpleNamespace(status='LISTEN',
+                laddr=SimpleNamespace(ip='127.0.0.1',port=p)) for p in (100,200)])
+        psutil=SimpleNamespace(process_iter=lambda _: [proc],Error=RuntimeError)
+        response=Mock()
+        response.__enter__=Mock(return_value=SimpleNamespace(read=lambda:b'vllm:generation_tokens_total 900\n'))
+        response.__exit__=Mock(return_value=False)
+        opener=Mock()
+        opener.open.side_effect=[http.client.BadStatusLine('HTTP/2 binary preface'),response]
+        values,errors=inference_metrics(psutil,opener)
+        self.assertEqual(values[0]['port'],200)
+        self.assertEqual(values[0]['vllm:generation_tokens_total'],900)
+        self.assertEqual(errors[0]['type'],'BadStatusLine')
+
     def test_partial_live_snapshot_falls_back_to_last_complete_history_row(self):
         valid=dict(time=10,checked_utc='sample',rollouts={})
         volume=SimpleNamespace(read_file=lambda name: [b'\x00'*20] if name.endswith('live.json')

@@ -1,6 +1,7 @@
 """Read-only telemetry for one isolated run; never starts work or retries it."""
 import argparse
 from datetime import datetime, timezone
+import http.client
 import json
 from pathlib import Path
 import signal
@@ -74,8 +75,12 @@ def inference_metrics(psutil, opener):
                 if conn.status != 'LISTEN' or ':' in conn.laddr.ip:
                     continue
                 port = conn.laddr.port
-                with opener.open(f'http://127.0.0.1:{port}/metrics', timeout=1) as response:
-                    metrics = parse_metrics(response.read().decode())
+                try:
+                    with opener.open(f'http://127.0.0.1:{port}/metrics', timeout=1) as response:
+                        metrics = parse_metrics(response.read().decode())
+                except (http.client.HTTPException, OSError, ValueError) as exc:
+                    errors.append(dict(pid=process.pid, port=port, type=type(exc).__name__))
+                    continue  # A vLLM process may also listen on a gRPC port.
                 if metrics:
                     result.append(dict(pid=process.pid, port=port, **metrics))
         except (psutil.Error, OSError, ValueError) as exc:
@@ -135,7 +140,8 @@ def main():
         temp.replace(control / 'live.json')
         with (control / 'telemetry.jsonl').open('a') as stream:
             stream.write(body)
-        if args.once or stop.wait(args.interval):
+        finalized = (row.get('phase') or {}).get('state') in ('completed', 'failed')
+        if args.once or finalized or stop.wait(args.interval):
             break
 
 
