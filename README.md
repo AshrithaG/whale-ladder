@@ -474,8 +474,8 @@ sleeping that solver, propagates HTTP failures without retrying, and records
 request counters separately from WHALE's completed-puzzle counts.
 
 The search runner scores the incoming baseline, proposes three harnesses per
-iteration, and evaluates each on 256 puzzles with one attempt per puzzle. The
-next iteration receives evaluation feedback. It defaults to one iteration and
+iteration, and evaluates each usable candidate on 256 puzzles with one attempt
+per puzzle. The next iteration receives evaluation feedback. It defaults to one iteration and
 accepts 1–6; the historical switching validation completed two real iterations.
 All servers use CUDA graphs and 75% inference memory. Proposing and scoring
 are sequential; an overlap benchmark showed no improvement.
@@ -495,9 +495,12 @@ SWITCH_MODE=benchmark SWITCH_REFERENCE_RUN=/path/to/previous/harness-run \
 The checkpoint merger publishes `hf/` only after successful conversion and
 validation, and marks it `.merge_complete`. An older unmarked merge is preserved
 before replacement. The runner writes server logs, `timing.jsonl`, router/GPU
-metrics, and `harness-run-dir`; `passed.json` requires all expected candidates
-to have 256-puzzle scores with the original 8,129-token assistant budget. Failure
-stops the run and preserves the evidence. Cleanup signals only subprocess groups
+metrics, and `harness-run-dir`; `passed.json` requires every requested slot to
+be recorded as evaluated or rejected. Evaluated candidates must have 256-puzzle
+scores with the original 8,129-token assistant budget. Invalid or missing
+candidates consume their slots; an entirely invalid iteration retains the
+incumbent. Scoring or infrastructure failure stops the run and preserves the
+evidence. Cleanup signals only subprocess groups
 started by this invocation; it does not submit or cancel an allocation.
 
 `benchmarks/two-gpu-search.json` records the historical comparison: the same
@@ -506,10 +509,8 @@ restarts and 393.70 seconds with sleep/wake. Each switch fell from approximately
 64–72 seconds to less than one second. These measurements exclude initial model
 startup and proposing, and do not establish a matched one-GPU/two-GPU speedup.
 
-This extracted branch still requires GPU validation before merging. It changes
-the baseline evaluation to use both GPUs and selects serialized switching for
-new searches; those exact extracted defaults have not been rerun on H100s.
-It does not fix proposer-generated invalid Python or missing harness functions,
-and it does not introduce automatic candidate repair. Keeping servers resident
-across weight updates, checkpoint hot reload, and the full alternating trial
-controller remain separate experimental work.
+The historical timings above do not validate this combined candidate on H100s.
+PR4 records invalid Python and missing harness functions as rejected proposals;
+it does not repair them. Cross-cycle server persistence and checkpoint reload
+are available through the separate `persistent-smoke` profile described above.
+GPU validation of the combined candidate remains pending.
