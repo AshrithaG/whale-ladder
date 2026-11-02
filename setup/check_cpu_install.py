@@ -21,6 +21,7 @@ from data_fingerprint import FILES, sha256
 
 def check(fingerprint):
     root = Path(os.environ['LADDER_ROOT'])
+    assert Path(sys.prefix).resolve() == (root / 'venv').resolve(), sys.prefix
     constraint = home / 'setup/constraints/psc-py311-cu130.txt'
     installed = {canonicalize_name(d.metadata['Name']): d.version for d in distributions()}
     mismatches = []
@@ -57,7 +58,8 @@ def check(fingerprint):
     assert shards and all(p.stat().st_size > 0 for p in shards), 'Missing model weights'
     return dict(cpu_installation_passed=True, gpu_validated=False,
         revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=home, text=True).strip(),
-        python=platform.python_version(), torch_cuda=torch.version.cuda,
+        python=platform.python_version(), python_prefix=sys.prefix, python_search_path=sys.path,
+        torch_cuda=torch.version.cuda,
         whale_revision=whale_revision,
         constraint_sha256=sha256(constraint), installed_packages=installed, constraint_mismatches=mismatches,
         data_fingerprint=actual, dataset_rows=rows, dataset_sha256=dict(zip(FILES, [sha256(data / n) for n in FILES])),

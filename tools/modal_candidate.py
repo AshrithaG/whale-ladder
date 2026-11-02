@@ -23,14 +23,20 @@ models = modal.Volume.from_name('whale-ladder-candidate-models', create_if_missi
 
 
 def install_on_cpu():
+    import os
     import subprocess
     from pathlib import Path
 
     code, root = Path('/opt/whale-ladder'), Path('/opt/whale-work')
     root.mkdir(parents=True, exist_ok=True)
+    # Modal injects /pkg into PYTHONPATH, which also exposes its own dependency
+    # metadata. Keep that runtime in the parent, outside experiment processes.
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+    env.pop('PYTHONHOME', None)
     with (root / 'install.log').open('w') as log:
         process = subprocess.Popen(['bash', str(code / 'setup/install.sh')],
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         for line in process.stdout:
             print(line, end='', flush=True)
             log.write(line)
@@ -42,7 +48,7 @@ source "$LADDER_HOME/ladder/config.env"
 source "$LADDER_HOME/ladder/profiles/modal-smoke.env"
 source "$VENV/bin/activate"
 python "$LADDER_HOME/setup/check_cpu_install.py" --fingerprint "$CHESS_DATA_FINGERPRINT" --output "$LADDER_ROOT/cpu-ready.json"
-'''], check=True)
+'''], check=True, env=env)
     models.commit()
 
 
