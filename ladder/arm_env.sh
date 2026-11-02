@@ -90,10 +90,12 @@ case "$ARM" in
   whale_qwen27b)
     PROPOSER_BACKEND=local
     export PROPOSER_MODEL_PATH="$(model_path "$QWEN27B_MODEL" "$QWEN27B_REVISION")" PROPOSER_TP=2
+    # The 27B's own memory settings win over any profile-wide proposer value.
+    export PROPOSER_GPU_UTIL="$QWEN27B_GPU_UTIL" PROPOSER_MAX_MODEL_LEN="$QWEN27B_MAX_MODEL_LEN"
     export SOLVER_GPUS=0,1 SOLVER_DP=2 PROPOSER_GPUS=2,3 ;;
   whale_qwen4b)
     PROPOSER_BACKEND=local
-    export PROPOSER_MODEL_PATH="$SOLVER_MODEL_PATH" PROPOSER_TP=1
+    export PROPOSER_MODEL_PATH="$(model_path "$WEAK_PROPOSER_MODEL" "$WEAK_PROPOSER_REVISION")" PROPOSER_TP=1
     export SOLVER_GPUS=0,1,2 SOLVER_DP=3 PROPOSER_GPUS=3 ;;
   whale_self)
     PROPOSER_BACKEND=local

@@ -125,9 +125,14 @@ merge_ckpt() {
   local staging
   staging="$(mktemp -d "$ckpt/.hf-merge.XXXXXX")" || return 1
   ladder_log "merging FSDP checkpoint $ckpt/actor -> $staging"
-  ( cd "$WHALE_DIR/domains/chess_puzzles" && \
-    PYTHONPATH="$PWD" python -m verl.model_merger merge --backend fsdp \
-      --local_dir "$ckpt/actor" --target_dir "$staging" ) || return $?
+  if [[ -n "${LADDER_MERGE_CMD:-}" ]]; then
+    # The CPU mock substitutes a fake merger; everything around it stays real.
+    $LADDER_MERGE_CMD --local_dir "$ckpt/actor" --target_dir "$staging" || return $?
+  else
+    ( cd "$WHALE_DIR/domains/chess_puzzles" && \
+      PYTHONPATH="$PWD" python -m verl.model_merger merge --backend fsdp \
+        --local_dir "$ckpt/actor" --target_dir "$staging" ) || return $?
+  fi
   # Some verl versions write weights only; vLLM also needs the tokenizer files.
   if [[ ! -f "$staging/tokenizer_config.json" && -d "$ckpt/actor/huggingface" ]]; then
     cp -n "$ckpt/actor/huggingface"/* "$staging"/ 2>/dev/null || true

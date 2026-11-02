@@ -13,10 +13,61 @@ proposer scaffold and its skill files) stays as WHALE released it.
 | `whale_qwen4b` | Qwen3.5-4B base weights, frozen (weak) | PSC, 1 GPU |
 | `whale_self` | the checkpoint just trained (self-improvement) | PSC, 1 GPU |
 
-This first milestone is the **one-cycle smoke test**: one short weight phase and
-one harness-search iteration per arm. It proves the pipeline runs and measures
-real per-step and per-candidate costs, so the full runs can be sized from data
-instead of guesses.
+## Running an arm: one command
+
+`ladder/run_cycles.sh ARM PROFILE` runs one arm end to end on the two-GPU
+layout: `CYCLES` x (train `STEPS_PER_CYCLE` steps with the current harness, then
+search `SEARCH_ITERS` iterations and accept the best harness), then scores the
+final model + harness on the held-out test puzzles. It chains
+`ladder/hybrid_test.sh` (training) and `ladder/search_two_gpu.sh` (search),
+resumes at the first unfinished phase when relaunched, and writes
+`$OUT_ROOT/cycles/<ARM>-<PROFILE>-s<SEED>/results.json`. Every proposer
+rung uses the same prompt, the same rules for invalid proposals (logged as
+`rejected_invalid` and skipped, never repaired), and the same scoring.
+
+| Profile | Where | Solver | Purpose |
+|---|---|---|---|
+| `mock` | any Linux CPU (cerlab23, PSC) | fakes | does the orchestration work? minutes |
+| `mini4090` | cerlab23, 1 RTX 4090 | Qwen3.5-0.8B | do the real libraries work? about an hour |
+| `h100` | PSC, 2 H100s | Qwen3.5-4B | the real runs |
+
+## Know it works before a real job: the testing ladder
+
+Each layer catches what the cheaper ones cannot; move up only when the layer
+below passes. Nothing here runs on a laptop (the mock scripts refuse macOS).
+
+| Layer | Command | Where | Catches | Time |
+|---|---|---|---|---|
+| 1. Mock run | `bash ladder/mock_run.sh` | cerlab23 or PSC, CPU | paths, hand-offs, manifest/invalid proposals, resume, cleanup, report | minutes |
+| 2. Proposer format check | `bash ladder/proposer_format_check.sh ARM mini4090 B1_RUN_DIR` | cerlab23 4090 (DeepSeek via API) | can each proposer write valid candidates | minutes |
+| 3. Replay B1's search | `bash ladder/search_two_gpu.sh OUT B1_CHECKPOINT 1` with `PROFILE=mini4090` | cerlab23 4090 | real model serving, scoring, the search loop | about 20 min |
+| 4. Mini full loop | `bash ladder/run_cycles.sh ARM mini4090` | cerlab23 4090 | real training, checkpoint hand-off, several cycles | about an hour |
+| 5. Tiny 4B confirmation | `ladder/run_cycles.sh ARM h100` with `CYCLES=1 STEPS_PER_CYCLE=1 SEARCH_ITERS=1` | PSC, 2 H100s, interactive | H100 kernels, full-size memory, the 27B proposer | 1 hour |
+| 6. Real runs | `ladder/run_cycles.sh ARM h100` in `sbatch` | PSC | the results | days |
+
+**Layer 1 setup (once, CPU only):**
+
+```bash
+export LADDER_ROOT=$HOME/whale-ladder-mock
+bash setup/install_mock.sh
+bash ladder/mock_run.sh        # ends with N/N checks passed
+```
+
+The mock runs the real controller, runners, search engine, router, WHALE search
+loop and chess scoring against fakes in `tests/mock/` (training, checkpoint
+merge, vLLM, Claude Code, LiteLLM, nvidia-smi). Its fake proposer deliberately
+writes broken Python, missing functions, wrong names, no output and a crash, and
+one training phase fails once, to prove the pipeline records and survives them.
+
+**Layers 2-4 setup on cerlab23 (once):**
+
+```bash
+export LADDER_ROOT=$HOME/whale-ladder-work CUDA_VISIBLE_DEVICES=0
+INSTALL_PROFILE=mini4090 SKIP_27B=1 bash setup/install.sh   # installs Miniforge if conda is missing
+```
+
+B1's saved search directory and resume checkpoint come from Sumanth's Hugging
+Face upload (the checkpoint must contain `actor/` and `data.pt`).
 
 ## How one cycle runs on 4 H100s
 

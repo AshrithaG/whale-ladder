@@ -1,0 +1,174 @@
+diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
+index 2b235b3..94549a0 100644
+--- a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
++++ b/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
+@@ -199,6 +199,95 @@ def recover_pending_candidates(run_dir: Path, names: list[str]) -> list[dict[str
+     return candidates
+ 
+ 
++def _reject_row(
++    iteration: int, name: str, candidate: dict[str, Any], reason: str, status: str = "rejected_invalid"
++) -> dict[str, Any]:
++    return {
++        "iteration": iteration,
++        "harness": name,
++        "status": status,
++        "reason": reason[:300],
++        "hypothesis": candidate.get("hypothesis", "") if isinstance(candidate, dict) else "",
++        "axis": candidate.get("axis", "?") if isinstance(candidate, dict) else "?",
++    }
++
++
++def read_pending_candidates(run_dir: Path, next_names: list[str], iter_dir: Path) -> list[Any]:
++    """Candidates from pending_eval.json, recovering what a malformed or missing
++    manifest leaves behind (whale-ladder). A proposal with no manifest and no
++    harness files yields no candidates instead of an exception."""
++    pending_path = run_dir / "pending_eval.json"
++    candidates: list[Any] = []
++    if pending_path.exists():
++        shutil.copy(pending_path, iter_dir / "pending_eval.json")
++        try:
++            data = json.loads(pending_path.read_text())
++            raw = data.get("candidates", []) if isinstance(data, dict) else data
++            candidates = raw if isinstance(raw, list) else []
++        except (ValueError, OSError) as exc:
++            print(f"{_ts()} pending_eval.json unreadable ({exc}); recovering from harness files")
++        pending_path.unlink()
++    if not candidates:
++        candidates = [
++            {"name": name, "axis": "recovered",
++             "hypothesis": "Recovered from proposer-created harness.py without usable pending_eval.json."}
++            for name in next_names
++            if (run_dir / "harnesses" / name / "harness.py").exists()
++        ]
++        if not candidates:
++            print(f"{_ts()} proposer wrote no manifest and no harness files")
++    return candidates
++
++
++def validate_proposals(
++    run_dir: Path, candidates: list[Any], next_names: list[str], iteration: int
++) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
++    """Split one proposal into loadable candidates and recorded rejects.
++
++    whale-ladder: one rule for every proposer model. Invalid proposals are
++    skipped and recorded instead of aborting the search, so a weak proposer
++    scores low rather than crashing the run, and the invalid count is itself a
++    measured outcome. No candidate is repaired.
++    Returns (valid_names, valid_candidates, invalid_rejects, prompt_only_rejects).
++    """
++    valid_names: list[str] = []
++    valid_candidates: list[dict[str, Any]] = []
++    invalid_rejects: list[dict[str, Any]] = []
++    prompt_only_rejects: list[dict[str, Any]] = []
++    for index, candidate in enumerate(candidates):
++        if not isinstance(candidate, dict):
++            invalid_rejects.append(_reject_row(iteration, f"entry{index}", {}, "manifest entry is not an object"))
++            continue
++        if "name" not in candidate:
++            # Proposers label the slot with a synonym; the chess skill never
++            # states the manifest format, so map the common ones.
++            for alias in ("slot", "harness", "id", "harness_name", "slot_name"):
++                if isinstance(candidate.get(alias), str):
++                    candidate["name"] = candidate[alias]
++                    print(f"{_ts()} pending_eval: mapped '{alias}' -> 'name' ({candidate['name']})")
++                    break
++        name = candidate.get("name")
++        if not isinstance(name, str) or name not in next_names:
++            invalid_rejects.append(
++                _reject_row(iteration, str(name), candidate, f"not one of this iteration's slots {next_names}")
++            )
++            continue
++        if name in valid_names:
++            continue
++        try:
++            validate_candidate(run_dir, name)
++        except Exception as exc:
++            status = "rejected_prompt_only" if PROMPT_ONLY else "rejected_invalid"
++            print(f"{_ts()} {status} {name}: {exc}")
++            (prompt_only_rejects if PROMPT_ONLY else invalid_rejects).append(
++                _reject_row(iteration, name, candidate, str(exc), status=status)
++            )
++            continue
++        valid_names.append(name)
++        valid_candidates.append(candidate)
++    return valid_names, valid_candidates, invalid_rejects, prompt_only_rejects
++
++
+ def build_harness_list(run_dir: Path, names: list[str]) -> list[tuple[str, Path]]:
+     return [(name, run_dir / "harnesses" / name / "harness.py") for name in names]
+ 
+@@ -479,58 +568,27 @@ def run_evolve(args: argparse.Namespace) -> None:
+                 use_api_key=args.use_api_key,
+             )
+             result.show()
+-            pending_path = run_dir / "pending_eval.json"
+-            if not pending_path.exists():
+-                candidates = recover_pending_candidates(run_dir, next_names)
+-                if not candidates:
+-                    raise RuntimeError("Proposer did not write pending_eval.json")
+-                pending_path.write_text(json.dumps({"candidates": candidates}, indent=2) + "\n")
+-            shutil.copy(pending_path, iter_dir / "pending_eval.json")
+-            candidates = json.loads(pending_path.read_text()).get("candidates", [])
+-
+-        valid_names = []
+-        prompt_only_rejects = []
+-        for candidate in candidates:
+-            if PROMPT_ONLY and "name" not in candidate:
+-                # The proposer occasionally labels the slot with a synonym.
+-                # Recover instead of aborting the round; the default mode keeps
+-                # its strict behaviour.
+-                for alias in ("slot", "harness", "id"):
+-                    if isinstance(candidate.get(alias), str):
+-                        candidate["name"] = candidate[alias]
+-                        print(f"{_ts()} pending_eval: mapped '{alias}' -> 'name' ({candidate['name']})")
+-                        break
+-            name = candidate["name"]
+-            if PROMPT_ONLY:
+-                # A constraint violation must not kill the whole MH run: skip
+-                # the candidate and record why, so the next proposer session
+-                # sees it in the archive.
+-                try:
+-                    validate_candidate(run_dir, name)
+-                except Exception as exc:
+-                    print(f"{_ts()} prompt-only reject {name}: {exc}")
+-                    prompt_only_rejects.append(
+-                        {
+-                            "iteration": iteration,
+-                            "harness": name,
+-                            "status": "rejected_prompt_only",
+-                            "reason": str(exc)[:300],
+-                            "hypothesis": candidate.get("hypothesis", ""),
+-                            "axis": candidate.get("axis", "?"),
+-                        }
+-                    )
+-                    continue
+-            else:
+-                validate_candidate(run_dir, name)
+-            valid_names.append(name)
++            candidates = read_pending_candidates(run_dir, next_names, iter_dir)
++
++        valid_names, valid_candidates, invalid_rejects, prompt_only_rejects = validate_proposals(
++            run_dir, candidates, next_names, iteration
++        )
++        if invalid_rejects:
++            append_evolution_summary(run_dir, invalid_rejects)
+         if not valid_names:
+             if prompt_only_rejects:
+                 append_evolution_summary(run_dir, prompt_only_rejects)
+-            raise RuntimeError("No valid candidates to evaluate.")
++            print(f"{_ts()} no valid candidates in iteration {iteration}; keeping accepted={current}")
++            (iter_dir / "comparison.json").write_text(json.dumps({
++                "iteration": iteration, "accepted_harness": current, "candidates": candidates,
++                "summary": [], "no_valid_candidates": True,
++                "rejected": invalid_rejects + prompt_only_rejects,
++            }, indent=2) + "\n")
++            continue
+ 
+         run_sweep(config, build_harness_list(run_dir, valid_names), logs_dir, force=args.force)
+         frontier = print_frontier(logs_dir, config)
+-        rows = candidate_summary_rows(iteration, candidates, logs_dir, frontier)
++        rows = candidate_summary_rows(iteration, valid_candidates, logs_dir, frontier)
+         early_stop = find_early_stop_candidate(rows, valid_names, early_stop_success_rate)
+         accepted = early_stop["harness"] if early_stop else pick_accepted(frontier, run_dir)
+         set_accepted_harness(run_dir, accepted)

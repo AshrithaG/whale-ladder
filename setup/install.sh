@@ -3,6 +3,7 @@
 #
 #   bash setup/install.sh            everything
 #   SKIP_27B=1 bash setup/install.sh skip the ~55 GB Qwen 27B download
+#   INSTALL_PROFILE=mini4090 SKIP_27B=1 bash setup/install.sh   cerlab23's 4090
 #
 # Run installation on a compute allocation with internet access.
 # Rerunning can resolve newer dependencies; do not rerun during an experiment.
@@ -12,40 +13,29 @@ LADDER_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 set -a
 source "$LADDER_HOME/ladder/config.env"
 [[ -f "$LADDER_HOME/ladder/secrets.env" ]] && source "$LADDER_HOME/ladder/secrets.env"
+# INSTALL_PROFILE=mini4090 downloads that profile's solver as well.
+[[ -n "${INSTALL_PROFILE:-}" ]] && source "$LADDER_HOME/ladder/profiles/$INSTALL_PROFILE.env"
 set +a
 say() { echo "[install $(date '+%T')] $*"; }
 mkdir -p "$LADDER_ROOT" "$HF_HOME" "$OUT_ROOT"
 
-# ---- 1. WHALE at the pinned commit, with the ladder patch -------------------
-if [[ ! -d "$WHALE_DIR/.git" ]]; then
-  say "cloning WHALE"
-  git clone -q "$WHALE_REPO" "$WHALE_DIR"
-fi
-git -C "$WHALE_DIR" fetch -q origin
-git -C "$WHALE_DIR" -c advice.detachedHead=false checkout -q "$WHALE_COMMIT"
-patch="$LADDER_HOME/patches/whale-ladder.patch"
-if git -C "$WHALE_DIR" apply --check -R "$patch" 2>/dev/null; then
-  say "WHALE patch already applied"
-else
-  git -C "$WHALE_DIR" apply "$patch"
-  say "applied $patch"
-fi
-
-# Restore missing files from this same pinned release, then apply runtime fixes.
-python3 "$LADDER_HOME/setup/repair_chess_release.py" "$WHALE_DIR"
-for compat_patch in vllm-routed-experts vllm-streamed-tied-weights torch-padding-fallback vllm-pause-generation shared-fsdp2; do
-  patch="$LADDER_HOME/patches/$compat_patch.patch"
-  if ! git -C "$WHALE_DIR" apply --check -R "$patch" 2>/dev/null; then
-    git -C "$WHALE_DIR" apply "$patch"
-  fi
-done
-install -m 644 "$LADDER_HOME/setup/streamed_weight_loading.py" "$WHALE_DIR/domains/chess_puzzles/verl/utils/vllm/streamed_weight_loading.py"
+# ---- 1. WHALE at the pinned commit, with every ladder patch ---------------
+LADDER_HOME="$LADDER_HOME" bash "$LADDER_HOME/setup/prepare_whale.sh"
 
 # ---- 2. Python env (conda for Python 3.11 + Node.js, venv on top) ----------
 CONDA_ENV="$LADDER_ROOT/conda"
 if [[ ! -x "$CONDA_ENV/bin/python" ]]; then
   command -v conda >/dev/null || module load anaconda3 2>/dev/null || true
-  command -v conda >/dev/null || { echo "conda not found; on Bridges-2 run: module load anaconda3"; exit 1; }
+  if ! command -v conda >/dev/null; then
+    # No conda module (e.g. cerlab23): install conda-forge's Miniforge into LADDER_ROOT.
+    if [[ ! -x "$LADDER_ROOT/miniforge/bin/conda" ]]; then
+      say "conda not found; installing Miniforge into $LADDER_ROOT/miniforge"
+      curl -fsSL -o "$LADDER_ROOT/miniforge.sh" \
+        "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh"
+      bash "$LADDER_ROOT/miniforge.sh" -b -p "$LADDER_ROOT/miniforge"
+    fi
+    export PATH="$LADDER_ROOT/miniforge/bin:$PATH"
+  fi
   say "creating conda env with python 3.11 and nodejs 20"
   conda create -y -q -p "$CONDA_ENV" -c conda-forge python=3.11 "nodejs=20"
 fi
@@ -91,6 +81,10 @@ hf_get() {
 }
 say "downloading $SOLVER_MODEL @ ${SOLVER_MODEL_REVISION:0:7}"
 hf_get "$SOLVER_MODEL" "$SOLVER_MODEL_REVISION"
+if [[ "$WEAK_PROPOSER_MODEL@$WEAK_PROPOSER_REVISION" != "$SOLVER_MODEL@$SOLVER_MODEL_REVISION" ]]; then
+  say "downloading weak proposer $WEAK_PROPOSER_MODEL @ ${WEAK_PROPOSER_REVISION:0:7}"
+  hf_get "$WEAK_PROPOSER_MODEL" "$WEAK_PROPOSER_REVISION"
+fi
 if [[ "${SKIP_27B:-0}" != 1 ]]; then
   say "downloading $QWEN27B_MODEL @ ${QWEN27B_REVISION:0:7} (large)"
   hf_get "$QWEN27B_MODEL" "$QWEN27B_REVISION"
