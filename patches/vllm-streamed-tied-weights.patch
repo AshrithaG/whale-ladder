@@ -1,0 +1,22 @@
+diff --git a/domains/chess_puzzles/verl/workers/rollout/vllm_rollout/utils.py b/domains/chess_puzzles/verl/workers/rollout/vllm_rollout/utils.py
+--- a/domains/chess_puzzles/verl/workers/rollout/vllm_rollout/utils.py
++++ b/domains/chess_puzzles/verl/workers/rollout/vllm_rollout/utils.py
+@@ -185,11 +185,14 @@ class vLLMWorkerExtension:
+             device=self.device,
+             use_shm=use_shm,
+         )
+-        receiver.receive_weights(
+-            on_bucket_received=lambda weights: self._update_weights(
+-                weights, peft_config=peft_config, base_sync_done=base_sync_done
++        from verl.utils.vllm.streamed_weight_loading import validate_tied_weights_after_stream
++
++        with validate_tied_weights_after_stream():
++            receiver.receive_weights(
++                on_bucket_received=lambda weights: self._update_weights(
++                    weights, peft_config=peft_config, base_sync_done=base_sync_done
++                )
+             )
+-        )
+ 
+         if self._is_qat_model:
+             # QAT: call process_weights_after_loading AFTER all buckets are received

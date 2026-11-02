@@ -4,9 +4,8 @@
 #   bash setup/install.sh            everything
 #   SKIP_27B=1 bash setup/install.sh skip the ~55 GB Qwen 27B download
 #
-# Safe to rerun: every step skips work that is already done. Needs internet,
-# so run it on a login node (or an interactive RM-shared session if a login
-# node kills it). It uses no GPU.
+# Run installation on a compute allocation with internet access.
+# Rerunning can resolve newer dependencies; do not rerun during an experiment.
 set -euo pipefail
 
 LADDER_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,6 +30,16 @@ else
   git -C "$WHALE_DIR" apply "$patch"
   say "applied $patch"
 fi
+
+# Restore missing files from this same pinned release, then apply runtime fixes.
+python3 "$LADDER_HOME/setup/repair_chess_release.py" "$WHALE_DIR"
+for compat_patch in vllm-routed-experts vllm-streamed-tied-weights torch-padding-fallback vllm-pause-generation; do
+  patch="$LADDER_HOME/patches/$compat_patch.patch"
+  if ! git -C "$WHALE_DIR" apply --check -R "$patch" 2>/dev/null; then
+    git -C "$WHALE_DIR" apply "$patch"
+  fi
+done
+install -m 644 "$LADDER_HOME/setup/streamed_weight_loading.py" "$WHALE_DIR/domains/chess_puzzles/verl/utils/vllm/streamed_weight_loading.py"
 
 # ---- 2. Python env (conda for Python 3.11 + Node.js, venv on top) ----------
 CONDA_ENV="$LADDER_ROOT/conda"
@@ -59,10 +68,12 @@ pip install -q "transformers>=5"
 grep -v -E '^\s*numpy' "$WHALE_DIR/domains/chess_puzzles/requirements.txt" > "$LADDER_ROOT/requirements-chess.txt"
 pip install -q -r "$LADDER_ROOT/requirements-chess.txt"
 pip install -q "litellm[proxy]" "huggingface_hub[cli]" openai
+bash "$LADDER_HOME/setup/install_checkpoint_backend.sh"
 pip install -q -e "$LADDER_HOME/shim"
 # Faster Gated DeltaNet kernels for Qwen3.5 training; transformers falls back
 # to a slower path without them.
 pip install -q flash-linear-attention || say "WARN: flash-linear-attention failed to install; training will be slower"
+bash "$LADDER_HOME/setup/install_gpu_kernels.sh"
 pip freeze > "$LADDER_ROOT/pip-freeze.txt"
 
 # ---- 3. Claude Code CLI (the WHALE proposer scaffold) -----------------------

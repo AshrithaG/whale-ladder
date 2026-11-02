@@ -1,0 +1,20 @@
+diff --git a/domains/chess_puzzles/verl/utils/attention_utils.py b/domains/chess_puzzles/verl/utils/attention_utils.py
+--- a/domains/chess_puzzles/verl/utils/attention_utils.py
++++ b/domains/chess_puzzles/verl/utils/attention_utils.py
+@@ -27,7 +27,15 @@ def _get_attention_functions() -> tuple[Callable, Callable, Callable, Callable]:
+     if is_torch_npu_available(check_device=False):
+         from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
+     else:
+-        from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
++        try:
++            from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
++        except ModuleNotFoundError as exc:
++            if exc.name != "flash_attn":
++                raise
++            # These bundled helpers use only torch/einops, despite the filename.
++            # They preserve padding gradients on CUDA too. This does not supply
++            # FlashAttention kernels: the model must use another attention backend.
++            from verl.utils.npu_flash_attn_utils import index_first_axis, pad_input, rearrange, unpad_input
+ 
+     _index_first_axis, _pad_input, _rearrange, _unpad_input = index_first_axis, pad_input, rearrange, unpad_input
+ 
