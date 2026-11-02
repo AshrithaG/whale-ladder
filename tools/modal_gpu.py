@@ -58,6 +58,8 @@ def prepare_plan(trial, cpu_receipt=None):
         schedule=dict(cycles=2, training_puzzles_per_cycle=256, training_attempts=8,
             search_iterations_per_cycle=1, candidate_slots_per_iteration=3,
             scoring_puzzles=256, scoring_attempts=1, final_test_puzzles=256, final_test_attempts=8),
+        logging=dict(heartbeat_seconds=10, rollout_completion_counters=True,
+            resource_and_inference_metrics=True, full_parameter_checksums=True),
         soft_deadline_seconds=13200, hourly_estimate_usd=11.075184,
         four_hour_compute_estimate_usd=44.300736,
         cost_note='Estimate, not a provider-enforced dollar cap; storage/egress are additional.'), sources
@@ -104,6 +106,7 @@ def run_gpu(plan, sources, results):
         LD_LIBRARY_PATH=str(root / 'conda/lib') + ':' + env.get('LD_LIBRARY_PATH', ''))
     python = str(root / 'venv/bin/python')
     phase = 'identity'
+    observer = None
 
     def command(name, argv):
         nonlocal phase
@@ -114,27 +117,34 @@ def run_gpu(plan, sources, results):
         write('status.json', dict(phase=name, started_unix=time.time(), argv=argv))
         print(f'Modal validation phase: {name}', flush=True)
         started = time.monotonic()
+        status, failure = None, None
         # The log goes straight to persistent storage, including subprocess
         # output produced immediately before a crash or disconnect.
-        with (control / f'{name}.log').open('x') as log:
-            process = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                       start_new_session=True, cwd=code)
-            try:
-                status = process.wait(timeout=remaining)
-            except BaseException:
+        try:
+            with (control / f'{name}.log').open('x') as log:
+                process = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                           start_new_session=True, cwd=code)
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=90)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=10)
-                except ProcessLookupError:
-                    pass
-                raise
-        with (control / 'phases.jsonl').open('a') as log:
-            log.write(json.dumps(dict(phase=name, returncode=status,
-                                     elapsed_seconds=time.monotonic() - started)) + '\n')
-        results.commit()
+                    status = process.wait(timeout=remaining)
+                except BaseException:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        process.wait(timeout=90)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=10)
+                    except ProcessLookupError:
+                        pass
+                    raise
+        except BaseException as exc:
+            failure = dict(type=type(exc).__name__, message=str(exc))
+            raise
+        finally:
+            with (control / 'phases.jsonl').open('a') as log:
+                log.write(json.dumps(dict(phase=name, returncode=status, failure=failure,
+                    started_unix=time.time() - (time.monotonic() - started), ended_unix=time.time(),
+                    elapsed_seconds=time.monotonic() - started)) + '\n')
+            results.commit()
         print(f'Modal validation phase ended: {name}; exit={status}', flush=True)
         if status:
             raise subprocess.CalledProcessError(status, argv)
@@ -166,17 +176,33 @@ def run_gpu(plan, sources, results):
         command('host', [python, probe, '--output', str(control / 'host.json')])
         host = json.loads((control / 'host.json').read_text())
         env.update(CUDA_VISIBLE_DEVICES=host['ladder_job_gpus'], LADDER_JOB_GPUS=host['ladder_job_gpus'])
+        command('logging-ready', [python, str(code / 'tools/observe_run.py'), str(out), '--once'])
+        live = json.loads((control / 'live.json').read_text())
+        if live.get('observation_error') or live.get('gpu_observation_error'):
+            raise RuntimeError(f'Live logging did not initialize: {live}')
+        with (control / 'observer.log').open('x') as log:
+            observer = subprocess.Popen([python, str(code / 'tools/observe_run.py'), str(out)],
+                env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, cwd=code)
         command('nccl', [python, '-m', 'torch.distributed.run', '--standalone', '--nproc_per_node=2', probe, '--nccl'])
         command('kernels', ['bash', str(code / 'setup/install_gpu_kernels.sh')])
         command('preflight', ['bash', str(code / 'setup/preflight.sh'), plan['arm'], plan['profile']])
         command('cycles', ['bash', str(code / 'ladder/run_cycles.sh'), plan['arm'], plan['profile']])
         write('execution-completed.json', dict(execution_completed=True, raw_audit_required=True,
                                              elapsed_seconds=time.monotonic() - began))
+        write('status.json', dict(phase='completed', state='completed', ended_unix=time.time()))
     except BaseException as exc:
+        write('status.json', dict(phase=phase, state='failed', ended_unix=time.time()))
         write('failure.json', dict(phase=phase, type=type(exc).__name__, message=str(exc),
                                   traceback=traceback.format_exc(), elapsed_seconds=time.monotonic() - began))
         raise
     finally:
+        if observer is not None and observer.poll() is None:
+            observer.terminate()
+            try:
+                observer.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                observer.kill()
+                observer.wait(timeout=5)
         # Normal failure/deadline cleanup is provided by the existing controller.
         # Single-use container termination also releases any surviving children.
         for name in ('pip-freeze.txt', 'install.log'):

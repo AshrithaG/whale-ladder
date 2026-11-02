@@ -1,0 +1,68 @@
+{
+  "kind": "Interrupted first Modal GPU validation; not an end-to-end pass",
+  "runtime_revision": "877a4f4466533c0f0879a65ba565a7803afe00f5",
+  "launcher_revision": "93ba644d510a786ec0de964dee74e3c86ba22bc2",
+  "image_id": "im-1uRsQ0NES8BmdMyIrsoQSR",
+  "app_url": "https://modal.com/apps/syegurla/main/ap-OtP7UnCf6ytSBeWZyAUUh8",
+  "stopped_at": "2026-11-02T11:58:23-05:00",
+  "reason": "User-requested stop to add live counters and fuller logging",
+  "gpu_devices": [
+    {
+      "name": "NVIDIA H100 80GB HBM3",
+      "memory_mib": 81559
+    },
+    {
+      "name": "NVIDIA H100 80GB HBM3",
+      "memory_mib": 81559
+    }
+  ],
+  "ram_gib": 256,
+  "cpu_affinity_count": 24,
+  "host_and_nccl_passed": true,
+  "kernel_setup_passed": true,
+  "preflight_passed": true,
+  "real_temporary_actor_probe": {
+    "passed": true,
+    "seconds": 126.7,
+    "peak_allocated_gib": 19.82,
+    "cpu_optimizer_step_passed": true,
+    "scientific_checkpoint_saved": false
+  },
+  "completed_phase_timings": [
+    {
+      "phase": "host",
+      "returncode": 0,
+      "elapsed_seconds": 5.0880193380000005
+    },
+    {
+      "phase": "nccl",
+      "returncode": 0,
+      "elapsed_seconds": 6.249537624
+    },
+    {
+      "phase": "kernels",
+      "returncode": 0,
+      "elapsed_seconds": 100.502755022
+    },
+    {
+      "phase": "preflight",
+      "returncode": 0,
+      "elapsed_seconds": 233.919047348
+    }
+  ],
+  "total_wrapper_elapsed_seconds": 758.926030181,
+  "completed_training_batches": 0,
+  "completed_search_phases": 0,
+  "final_test_completed": false,
+  "partial_generated_rollouts": null,
+  "partial_rollout_note": "Generation may have started before termination. No completed batch/rollout file was saved; a partial completion count is unavailable.",
+  "compute_cost_estimate_usd": 2.33,
+  "cost_limitations": "List-rate estimate for wrapper duration, not an invoice; startup and storage are separate.",
+  "raw_evidence": ".candidate-control/modal-gpu-20261102/trial-a-evidence",
+  "results_volume": "whale-ladder-gpu-validation-20261102-a",
+  "limitations": [
+    "Both real training cycles, search persistence/reload, and final test remain unvalidated.",
+    "Filesystem free capacity is virtual; the reported 8 EiB is not a physical disk measurement.",
+    "Zero completed batches does not mean zero model requests or generated attempts."
+  ]
+}

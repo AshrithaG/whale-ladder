@@ -172,12 +172,16 @@ launch. A teammate using their own prepared image can pass `--cpu-receipt`
 with the JSON returned by `tools/modal_candidate.py`.
 
 ```bash
-# In the isolated Modal client environment (modal==1.6.3):
-python tools/modal_gpu.py --trial validation-20261102-a
+# In the isolated Modal client environment (modal==1.6.3), from a clean commit:
+# CPU-only: reuse the saved installation, update source and verify logging.
+python tools/modal_gpu_image.py --output .candidate-control/logging-image.json
+python tools/modal_gpu.py --trial validation-20261102-b \
+  --cpu-receipt .candidate-control/logging-image.json
 
 # Paid operation: run only after checking PSC state and approving the budget.
-python tools/modal_gpu.py --trial validation-20261102-a --launch \
-  --receipt .candidate-control/modal-gpu-20261102/submission.json
+python tools/modal_gpu.py --trial validation-20261102-b --launch \
+  --cpu-receipt .candidate-control/logging-image.json \
+  --receipt .candidate-control/modal-gpu-20261102/submission-b.json
 ```
 
 The request is one container with `H100!:2` (no H200 substitution), 24 physical
@@ -239,6 +243,72 @@ validation has been performed by the launcher preparation work.
 
 Local wrapper checks (no provider calls or GPUs):
 `python -m unittest discover -s tests -p test_modal_gpu.py`.
+
+### Live logging and measurement meanings
+
+The `modal-smoke` profile enables the existing opt-in rollout completion
+instrumentation. It counts completed, exceptional and cancelled attempts in
+training, quick post-update validation, harness evaluation and the final test.
+A completed attempt may be an incorrect answer. Accepted RSFT samples and
+optimizer updates are separate batch-end metrics. Async gather and candidate
+result ordering are preserved; there are no extra model requests, retries or
+candidate opportunities. The installer saves original sources and records the
+before/after/helper hashes.
+
+```bash
+python tools/modal_gpu_status.py \
+  --receipt .candidate-control/modal-gpu-20261102/submission-b.json
+# The same observation as machine-readable JSON:
+python tools/modal_gpu_status.py \
+  --receipt .candidate-control/modal-gpu-20261102/submission-b.json --json
+```
+
+The observer runs in the existing container, writes a heartbeat every ten
+seconds, and preserves `modal-control/live.json` plus `telemetry.jsonl`.
+Snapshots include worker counts/update ages, CPU/RAM and GPU utilization/HBM,
+and available vLLM metrics: generated tokens, token rate, HTTP model responses,
+running/waiting requests, KV-cache usage and preemptions. HTTP responses are not
+completed puzzle rollouts. Missing worker snapshots or missing metrics mean
+unavailable observations, not zero work. A readiness check verifies logging
+before model startup; observation errors are recorded explicitly. No observer
+action restarts work or changes experiment decisions.
+
+Worker snapshots live in each training/evaluation phase's `rollout-progress/`;
+completed batch snapshots are retained in `finished/`. Search snapshots are
+under each harness evaluation's output directory. Counters are throttled to
+five-second or 64-completion boundaries, so they are recent lower bounds while
+a batch is running. The final count must be checked against raw rollout files.
+
+`phase-timing.jsonl` and `current-phase.json` record sequential controller
+boundaries for training, parking, checkpoint merging, search preparation,
+server startup/refresh, search and final evaluation. `timing-report.json` and
+`results.json` collect those totals alongside existing trainer timers,
+proposer-session costs/tokens/durations and search events. Nested timers may
+overlap; they must not be added to controller wall time. Candidate attempt
+execution includes model calls, harness work and reward checking; the new
+search `evaluation-timing.json` separates that from aggregation/file writing.
+It does not claim to isolate GPU generation from reward checking. Full raw
+parameter-checksum responses are retained in `weight-checksums.jsonl`.
+
+The logging image is derived from the verified CPU image using an exact Git
+bundle from the local commit. It reuses the installed environment, installs
+official matching kernel wheels on CPUs, checks constraints/data/models, and
+preserves the parent CPU receipt. Its source revision and image ID are recorded
+separately from the parent `877a4f4` installation. Real kernel execution and
+the actor probe still require GPU preflight. The original image alone does not
+contain these later logging changes.
+
+Modal's filesystem can report virtual free capacity (the first trial reported
+approximately 8 EiB). The host receipt flags such a value; it is not a physical
+disk-capacity measurement. The function requests a 512 GiB scratch quota. Keep
+that provider resource request and the raw filesystem result separate in any
+resource audit.
+
+The first Modal attempt was stopped by user request before a completed training
+batch was saved, to add this logging. Its preflight passed; this does not count
+as completion of either training cycle. Partial generated-attempt counts were
+not observable, so a restart is a distinct validation attempt. The results
+Volume and local raw evidence remain preserved.
 
 ## Running an arm: one command
 
@@ -558,11 +628,13 @@ The small eager/graph comparison used 128 rollouts and a single rollout GPU;
 its speedup should not be extrapolated as a universal multiplier. The 75%
 memory setting worked, but a matched 60% control was not completed.
 
-This is a review extraction from development runs. It removes optional live
-progress instrumentation and persistent-server integration, and makes the
+This was a review extraction from development runs. It removed optional live
+progress instrumentation and persistent-server integration, and made the
 measured eight-worker/75% configuration the opt-in runner's defaults. Its exact
 extracted revision still needs a GPU generation/update validation before
 merging. It is not a complete harness-search or full research schedule.
+The later candidate's Modal profile restores completion counters as documented
+above; the historical extracted revision did not include them.
 
 ## Two-GPU candidate scoring and sleep/wake switching (opt-in)
 

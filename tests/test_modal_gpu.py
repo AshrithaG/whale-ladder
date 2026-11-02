@@ -37,6 +37,8 @@ class ModalWrapperTests(unittest.TestCase):
             envs.append(kwargs['env'].copy())
             if phase == 'host':
                 Path(argv[-1]).write_text(json.dumps(dict(ladder_job_gpus='GPU-assigned7,GPU-assigned3')))
+            if phase == 'logging-ready':
+                (root / 'runs/modal-control/live.json').write_text('{}')
             proc = Mock(pid=123456)
             proc.wait.side_effect = ([subprocess.TimeoutExpired(argv, 1), 0]
                                     if phase == timeout_phase else None)
@@ -59,7 +61,7 @@ class ModalWrapperTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.execute(f)
         root, _, _, _, phases, envs, _, volume, _ = f
-        self.assertEqual(phases, ['host', 'nccl', 'kernels', 'preflight'])
+        self.assertEqual(phases, ['host', 'logging-ready', 'observer', 'nccl', 'kernels', 'preflight'])
         failure = json.loads((root / 'runs/modal-control/failure.json').read_text())
         self.assertEqual(failure['phase'], 'preflight')
         self.assertFalse((root / 'runs/modal-control/execution-completed.json').exists())

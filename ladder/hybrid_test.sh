@@ -68,6 +68,9 @@ if [[ -f "$VERL_FILE_LOGGER_PATH" && "$dry_run" != --dry-run ]]; then
   echo 'Use a fresh output directory for another hybrid attempt.' >&2
   exit 2
 fi
+if [[ "${LADDER_ROLLOUT_PROGRESS:-0}" == 1 ]]; then
+  python "$LADDER_HOME/setup/install_rollout_progress.py" "$DOMAIN_DIR" "$test_dir/source-backups"
+fi
 python "$LADDER_HOME/setup/prepare_hybrid_launcher.py" "$DOMAIN_DIR" "$test_dir/launcher"
 export LADDER_HYBRID_PREAMBLE="$test_dir/launcher/preamble_hybrid.py"
 launcher="${LADDER_TRAIN_LAUNCHER:-$test_dir/launcher/train_hybrid.sh}"
@@ -88,6 +91,9 @@ args=(trainer.resume_mode=disable "trainer.total_training_steps=$target_step"
       actor_rollout_ref.rollout.data_parallel_size=1
       actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
       '~trainer.disaggregated_rsft')
+if [[ "${LADDER_ROLLOUT_PROGRESS:-0}" == 1 ]]; then
+  args+=("+trainer.rollout_progress_dir=$test_dir/rollout-progress")
+fi
 if [[ "$mode" == train && -n "${HYBRID_RESUME_CHECKPOINT:-}" ]]; then
   args+=(trainer.resume_mode=resume_path "trainer.resume_from_path=$HYBRID_RESUME_CHECKPOINT")
 fi
@@ -101,6 +107,9 @@ if [[ "$dry_run" == --dry-run ]]; then
   exit 0
 fi
 cleanup() {
+  if [[ "${LADDER_ROLLOUT_PROGRESS:-0}" == 1 ]]; then
+    python "$LADDER_HOME/setup/ladder_rollout_progress.py" "$test_dir/rollout-progress" "$test_dir/rollout-progress-final.json" || true
+  fi
   stop_job_ray
 }
 trap cleanup EXIT

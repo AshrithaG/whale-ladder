@@ -5,6 +5,7 @@ Finished phases can be reused; an unfinished phase is preserved and rerun.
 No candidate repairs, automatic service restarts, or Slurm job mutations.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -25,6 +26,29 @@ def write(path, value):
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+@contextmanager
+def timed(state, phase):
+    """Sequential controller boundaries; inner trainer/search timers can overlap."""
+    started, clock = time.time(), time.monotonic()
+    record = dict(phase=phase, started_unix=started, status='running')
+    temporary = state / 'current-phase.tmp'
+    write(temporary, record)
+    temporary.replace(state / 'current-phase.json')
+    try:
+        yield
+    except BaseException as exc:
+        record.update(status='failed', error_type=type(exc).__name__, error=str(exc))
+        raise
+    else:
+        record['status'] = 'completed'
+    finally:
+        record.update(ended_unix=time.time(), elapsed_seconds=time.monotonic() - clock)
+        with (state / 'phase-timing.jsonl').open('a') as log:
+            log.write(json.dumps(record) + '\n')
+        write(temporary, record)
+        temporary.replace(state / 'current-phase.json')
 
 
 def phase_ok(path):
@@ -136,7 +160,8 @@ def run(arm, profile):
             env['HYBRID_RESUME_CHECKPOINT' if mode == 'train' else 'HYBRID_SOURCE_CHECKPOINT'] = str(checkpoint)
         if receipt:
             env['HYBRID_PERSISTENT_SLEEP_RECEIPT'] = str(receipt)
-        command(['bash', str(home / 'ladder/hybrid_test.sh'), str(directory)], env)
+        with timed(state, directory.name):
+            command(['bash', str(home / 'ladder/hybrid_test.sh'), str(directory)], env)
 
     try:
         for cycle in range(1, cycles + 1):
@@ -154,7 +179,8 @@ def run(arm, profile):
                 write(train_dir / 'persistent-inputs.json', inputs)
                 receipt = state / f'c{cycle}-sleep.json' if engine else None
                 if engine:
-                    engine.park(receipt)
+                    with timed(state, f'c{cycle}-park-search-servers'):
+                        engine.park(receipt)
                 status(f'cycle {cycle}/{cycles}: training')
                 original = harness
                 harness = used
@@ -175,25 +201,30 @@ def run(arm, profile):
                 set_aside(search)
                 (search / 'state/claude-config').mkdir(parents=True)
                 write(search / 'persistent-inputs.json', search_inputs)
-                command(['bash', '-c', 'source "$LADDER_HOME/ladder/lib.sh"; merge_ckpt "$1"', 'merge', str(checkpoint)])
+                with timed(state, f'c{cycle}-merge-checkpoint'):
+                    command(['bash', '-c', 'source "$LADDER_HOME/ladder/lib.sh"; merge_ckpt "$1"', 'merge', str(checkpoint)])
                 os.environ.update(SWITCH_OUT=str(search), RUN_OUT=str(search), SWITCH_CHECKPOINT=str(checkpoint),
                     SWITCH_CONFIG=str(search / 'state/mh_config.json'),
                     CLAUDE_CONFIG_DIR=str(search / 'state/claude-config'),
                     LADDER_COST_LEDGER=str(search / 'proposer_cost.jsonl'),
                     LADDER_CYCLE_SEARCH_NAME=f'mh-persistent-j{job_tag}-{name}-c{cycle}-{invocation}',
                     BASELINE_HARNESS_OVERRIDE=str(harness), CHESS_PUZZLE_PROPOSER_RETRIES='1')
-                command(['python', str(home / 'tools/make_mh_config.py'),
-                         str(Path(os.environ['DOMAIN_DIR']) / 'meta_harness/config-chess-puzzle.json'),
-                         os.environ['SWITCH_CONFIG']])
+                with timed(state, f'c{cycle}-prepare-search-config'):
+                    command(['python', str(home / 'tools/make_mh_config.py'),
+                             str(Path(os.environ['DOMAIN_DIR']) / 'meta_harness/config-chess-puzzle.json'),
+                             os.environ['SWITCH_CONFIG']])
                 status(f'cycle {cycle}/{cycles}: search')
                 if engine is None:
                     engine = PersistentSearch()
-                    engine.initialize()
+                    with timed(state, f'c{cycle}-search-server-startup'):
+                        engine.initialize()
                 else:
                     engine.out = search
                     engine.config = json.loads(Path(os.environ['SWITCH_CONFIG']).read_text())
-                    engine.refresh(checkpoint / 'hf')
-                outcome = engine.search(mh, iterations)
+                    with timed(state, f'c{cycle}-refresh-search-checkpoint'):
+                        engine.refresh(checkpoint / 'hf')
+                with timed(state, f'c{cycle}-search'):
+                    outcome = engine.search(mh, iterations)
                 engine.verify_pids()
                 write(search / 'passed.json', dict(passed=True, search_iterations=iterations,
                     candidates_requested=plan['proposals'] * iterations, puzzles_per_candidate=plan['scoring_puzzles'],
@@ -211,7 +242,8 @@ def run(arm, profile):
         # Evaluation uses the shared training launcher. Release resident search
         # processes first so its ordinary idle-GPU check remains applicable.
         if engine:
-            engine.close()
+            with timed(state, 'search-server-shutdown'):
+                engine.close()
             engine = None
         final = state / 'final-test'
         shutil.copyfile(harness, state / 'final-harness.py')

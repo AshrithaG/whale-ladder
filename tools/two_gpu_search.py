@@ -120,6 +120,7 @@ class Experiment:
         self.launch_counts[name] = self.launch_counts.get(name, 0) + 1
         logfile = self.out / f'{name}-{self.launch_counts[name]}.log'
         started = time.monotonic()
+        self.event('server_start_begin', name=name, logfile=str(logfile))
         with logfile.open('w') as log:
             self.processes[name] = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
                                                    start_new_session=True)
@@ -205,6 +206,7 @@ class Experiment:
             self.sleep('solver1')
             self.wake('proposer')
         self.check_model('proposer')
+        self.phase = 'proposing'
         self.event('transition_to_proposing', mode=mode, seconds=time.monotonic()-started)
 
     def monitor(self):
@@ -245,6 +247,7 @@ class Experiment:
         try:
             for name, path in harnesses:
                 stage = time.monotonic()
+                self.event('candidate_score_begin', harness=name)
                 measured = sweep(copy.deepcopy(config), [(name, path)], logs, force=True)
                 self.event('candidate_score', harness=name, seconds=time.monotonic()-stage, results=measured)
                 if any(not ok for _, ok in measured):

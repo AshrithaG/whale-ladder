@@ -3,3 +3,4 @@
 **/*.egg-info
 ladder/secrets.env
 validation_results
+.candidate-control

@@ -53,6 +53,7 @@ def inspect_host():
         original_nvidia_visible_devices=os.environ.get('NVIDIA_VISIBLE_DEVICES'),
         cpu_affinity=sorted(os.sched_getaffinity(0)), cgroup=cgroup,
         meminfo=Path('/proc/meminfo').read_text(), scratch_free_bytes=free,
+        scratch_capacity_is_virtual=free > 3 * 1024**4,
         torch=torch.__version__, torch_cuda=torch.version.cuda, nccl=torch.cuda.nccl.version(),
         python_prefix=sys.prefix)
 

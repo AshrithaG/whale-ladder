@@ -99,6 +99,9 @@ class PersistentSearch(Experiment):
         if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict) or not values[0]:
             raise RuntimeError('Expected full weight checksums from one TP=1 worker')
         digest = hashlib.sha256(json.dumps(values[0], sort_keys=True).encode()).hexdigest()
+        with (self.out / 'weight-checksums.jsonl').open('a') as log:
+            log.write(json.dumps(dict(time=time.time(), name=name,
+                pid=self.processes[name].pid, digest=digest, checksums=values[0])) + '\n')
         self.event('weight_digest', name=name, digest=digest, parameters=len(values[0]))
         return digest
 
