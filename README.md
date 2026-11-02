@@ -155,6 +155,12 @@ validation pending. The `modal-smoke` profile uses the same experiment as
 `persistent-smoke`, with the container's compiler replacing PSC modules.
 GPU execution is a separate step; this command does not run the experiment.
 
+The [Modal CPU evidence](benchmarks/modal-candidate-cpu.json) records a clean
+installation at `877a4f4` on 2026-11-02: 297 installed packages, zero constraint
+mismatches, the exact PSC dataset, and pinned 4B weights. A second CPU container
+successfully reopened the saved image and model Volume. H100 validation remains
+pending; this establishes CPU preparation and cache reuse only.
+
 ## Running an arm: one command
 
 `ladder/run_cycles.sh ARM PROFILE` runs one arm end to end on the two-GPU
