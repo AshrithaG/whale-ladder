@@ -116,19 +116,31 @@ stop_job_ray() {
 # Hugging Face directory. Produces CKPT_DIR/hf once and reuses it afterwards.
 merge_ckpt() {
   local ckpt="$1" hf="$1/hf"
-  if [[ -f "$hf/config.json" ]] && ls "$hf"/*.safetensors >/dev/null 2>&1; then
+  if [[ -f "$hf/.merge_complete" && -f "$hf/config.json" ]] && ls "$hf"/*.safetensors >/dev/null 2>&1; then
     ladder_log "merged checkpoint already present: $hf"
     return 0
   fi
-  ladder_log "merging FSDP checkpoint $ckpt/actor -> $hf"
+  # A wall-time interruption can leave a config and only some weight shards.
+  # Publish the serving directory only after the merger exits successfully.
+  local staging
+  staging="$(mktemp -d "$ckpt/.hf-merge.XXXXXX")" || return 1
+  ladder_log "merging FSDP checkpoint $ckpt/actor -> $staging"
   ( cd "$WHALE_DIR/domains/chess_puzzles" && \
     PYTHONPATH="$PWD" python -m verl.model_merger merge --backend fsdp \
-      --local_dir "$ckpt/actor" --target_dir "$hf" )
+      --local_dir "$ckpt/actor" --target_dir "$staging" ) || return $?
   # Some verl versions write weights only; vLLM also needs the tokenizer files.
-  if [[ ! -f "$hf/tokenizer_config.json" && -d "$ckpt/actor/huggingface" ]]; then
-    cp -n "$ckpt/actor/huggingface"/* "$hf"/ 2>/dev/null || true
+  if [[ ! -f "$staging/tokenizer_config.json" && -d "$ckpt/actor/huggingface" ]]; then
+    cp -n "$ckpt/actor/huggingface"/* "$staging"/ 2>/dev/null || true
   fi
-  [[ -f "$hf/config.json" ]] || { ladder_log "ERROR: merge produced no config.json in $hf"; return 1; }
+  [[ -f "$staging/config.json" && -f "$staging/tokenizer_config.json" ]] \
+    && ls "$staging"/*.safetensors >/dev/null 2>&1 \
+    || { ladder_log "ERROR: merge output incomplete in $staging"; return 1; }
+  touch "$staging/.merge_complete" || return 1
+  if [[ -e "$hf" ]]; then
+    mv "$hf" "$staging.previous" || return 1
+    ladder_log "preserved previous unmarked merge at $staging.previous"
+  fi
+  mv "$staging" "$hf"
 }
 
 # start_vllm NAME MODEL SERVED_NAME GPUS PORT MAX_LEN TP DP [extra vllm args...]

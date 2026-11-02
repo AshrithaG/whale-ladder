@@ -277,3 +277,58 @@ progress instrumentation and persistent-server integration, and makes the
 measured eight-worker/75% configuration the opt-in runner's defaults. Its exact
 extracted revision still needs a GPU generation/update validation before
 merging. It is not a complete harness-search or full research schedule.
+
+## Two-GPU candidate scoring and sleep/wake switching (opt-in)
+
+`ladder/search_two_gpu.sh` runs a standalone harness-search phase from a saved
+solver checkpoint. It uses two H100 80GB GPUs, a frozen Qwen3.5-4B proposer,
+and the original 256-puzzle harness-search dataset. Use an idle allocation;
+the development runs requested 24 CPU cores and 256 GiB host memory.
+
+GPU 0 keeps one solver replica. GPU 1 alternates between a second solver replica
+and the proposer using vLLM level-1 sleep/wake; both processes stay alive after
+initialization. A loopback router distributes scoring requests between the
+solver replicas, with capacity 128 requests per backend. It drains GPU 1 before
+sleeping that solver, propagates HTTP failures without retrying, and records
+request counters separately from WHALE's completed-puzzle counts.
+
+The search runner scores the incoming baseline, proposes three harnesses per
+iteration, and evaluates each on 256 puzzles with one attempt per puzzle. The
+next iteration receives evaluation feedback. It defaults to one iteration and
+accepts 1–6; the historical switching validation completed two real iterations.
+All servers use CUDA graphs and 75% inference memory. Proposing and scoring
+are sequential; an overlap benchmark showed no improvement.
+
+After installing this branch, with the same environment setup as above:
+
+```bash
+# Checkpoint must contain actor/ and data.pt. Output must not already exist.
+bash ladder/search_two_gpu.sh "$LADDER_ROOT/review/search" /path/to/global_step_1 2
+
+# Optional matched comparison: replay the same saved h1/h2/h3 candidates
+# with restart, sleep/wake, and overlapped sleep/wake; then run two real searches.
+SWITCH_MODE=benchmark SWITCH_REFERENCE_RUN=/path/to/previous/harness-run \
+  bash ladder/search_two_gpu.sh "$LADDER_ROOT/review/switch-benchmark" /path/to/global_step_1
+```
+
+The checkpoint merger publishes `hf/` only after successful conversion and
+validation, and marks it `.merge_complete`. An older unmarked merge is preserved
+before replacement. The runner writes server logs, `timing.jsonl`, router/GPU
+metrics, and `harness-run-dir`; `passed.json` requires all expected candidates
+to have 256-puzzle scores with the original 8,129-token assistant budget. Failure
+stops the run and preserves the evidence. Cleanup signals only subprocess groups
+started by this invocation; it does not submit or cancel an allocation.
+
+`benchmarks/two-gpu-search.json` records the historical comparison: the same
+three-candidate round, including switching, took 559.71 seconds with server
+restarts and 393.70 seconds with sleep/wake. Each switch fell from approximately
+64–72 seconds to less than one second. These measurements exclude initial model
+startup and proposing, and do not establish a matched one-GPU/two-GPU speedup.
+
+This extracted branch still requires GPU validation before merging. It changes
+the baseline evaluation to use both GPUs and selects serialized switching for
+new searches; those exact extracted defaults have not been rerun on H100s.
+It does not fix proposer-generated invalid Python or missing harness functions,
+and it does not introduce automatic candidate repair. Keeping servers resident
+across weight updates, checkpoint hot reload, and the full alternating trial
+controller remain separate experimental work.
