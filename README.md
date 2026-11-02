@@ -161,6 +161,85 @@ mismatches, the exact PSC dataset, and pinned 4B weights. A second CPU container
 successfully reopened the saved image and model Volume. H100 validation remains
 pending; this establishes CPU preparation and cache reuse only.
 
+### First Modal GPU validation (launch requires spending approval)
+
+`tools/modal_gpu.py` wraps the existing installer, preflight and persistent
+cycle runner. Its default action only checks local source identity and prints
+a plan; it starts no Modal App. The default saved image runs experiment code
+at `877a4f4`, while the wrapper is serialized separately and retained with its
+source hashes. Changes to the image's experiment files are rejected before
+launch. A teammate using their own prepared image can pass `--cpu-receipt`
+with the JSON returned by `tools/modal_candidate.py`.
+
+```bash
+# In the isolated Modal client environment (modal==1.6.3):
+python tools/modal_gpu.py --trial validation-20261102-a
+
+# Paid operation: run only after checking PSC state and approving the budget.
+python tools/modal_gpu.py --trial validation-20261102-a --launch \
+  --receipt .candidate-control/modal-gpu-20261102/submission.json
+```
+
+The request is one container with `H100!:2` (no H200 substitution), 24 physical
+CPU cores, 256 GiB RAM and 512 GiB scratch quota. CPU and memory limits equal
+their requests. The function has a 230-minute execution timeout, with a
+220-minute work deadline to leave time for cleanup, and a separate ten-minute
+startup timeout. The planning envelope is four hours including startup,
+approximately **$44.30 compute** at the November 2, 2026 list rates, plus
+applicable storage/egress. This is an estimate, not a provider-enforced dollar
+cap. Historical development timings suggest 1.75–2.5 hours; this exact image
+and candidate have no measured GPU runtime yet. See Modal's
+[pricing](https://modal.com/pricing), [resource limits](https://modal.com/docs/guide/resources)
+and [GPU selection](https://modal.com/docs/guide/gpu).
+
+Before model work, the wrapper checks the baked CPU receipt and runtime source
+hashes, records the CUDA-to-GPU-UUID mapping and resources, requires at least
+200 GiB free scratch, and runs a real two-rank NCCL all-reduce. It then invokes
+`install_gpu_kernels.sh`, `preflight.sh whale_qwen4b modal-smoke`, and
+`run_cycles.sh whale_qwen4b modal-smoke`. Experiment children clear Modal's
+`PYTHONPATH`/`PYTHONHOME`; the provider parent environment remains intact.
+
+Each trial uses a new `whale-ladder-gpu-<trial>` Volume mounted only at
+`/opt/whale-work/runs`. Model cache stays mounted at `/models`. The wrapper
+redirects WHALE's candidate-run directory and preflight outputs into that
+results Volume, preserving raw accepted/rejected harnesses and configuration.
+`modal-control/` contains the plan, exact wrapper/probe sources, CPU receipt,
+host mapping, phase logs/timings, kernel package inventory and completion or
+failure receipt. The ordinary cycle layout remains
+`cycles/whale_qwen4b-modal-smoke-s42/`.
+
+The App is detached and submits a single invocation; the local receipt records
+its App and FunctionCall IDs. A client disconnect after submission does not
+cancel the detached run. A local error before that receipt is complete is
+ambiguous: inspect live Apps before resubmitting. Automatic input retries are
+disabled. Modal can still replay inputs after preemption, so a committed start
+marker refuses to execute a second experiment in the same results Volume.
+Preemption, OOM or a hard kill may prevent finalization; completed commits and
+Volume background commits remain, but an interrupted write is not guaranteed.
+See [detached Apps](https://modal.com/docs/guide/apps) and
+[preemption](https://modal.com/docs/guide/preemption).
+
+```bash
+modal container list --app-id APP_ID --json
+modal app logs APP_ID --timestamps
+modal volume get whale-ladder-gpu-validation-20261102-a /modal-control/status.json -
+# After execution, retrieve the complete evidence/checkpoints to a fresh path:
+modal volume get whale-ladder-gpu-validation-20261102-a / /path/to/fresh-evidence
+```
+
+Phase boundaries explicitly commit the Volume; active subprocess output goes
+directly to persistent log files. The wrapper's `execution-completed.json`
+means the existing commands returned success, **not** that the raw audit is
+complete. Verify 2,048 training rollouts per cycle, positive accepted samples
+and optimizer updates, three consumed candidate slots per cycle, correct
+checkpoint/dataloader/harness handoffs, stable search-server PIDs, agreeing and
+changing full solver checksums, a fixed proposer checksum, and 2,048 final test
+rollouts. An incomplete invariant keeps GPU validation incomplete. No paid GPU
+validation has been performed by the launcher preparation work.
+
+Local wrapper checks (no provider calls or GPUs):
+`python -m unittest discover -s tests -p test_modal_gpu.py`.
+
 ## Running an arm: one command
 
 `ladder/run_cycles.sh ARM PROFILE` runs one arm end to end on the two-GPU
