@@ -2,8 +2,10 @@
 
 Runs WHALE's chess experiment (Qwen3.5-4B, Lichess puzzles) with the harness
 proposer swapped across a ladder of models, to test whether a small model can
-improve its own agent. Everything else (data, training, scoring, the Claude Code
-proposer scaffold and its skill files) stays as WHALE released it.
+improve its own agent. Model revisions, data fingerprints and the Claude Code
+proposer scaffold are fixed across arms. Profiles select the training/search
+budget and GPU layout; the PSC compatibility and execution changes are
+described below.
 
 | Arm | Proposer model | Where it runs |
 |---|---|---|
@@ -18,9 +20,11 @@ proposer scaffold and its skill files) stays as WHALE released it.
 This branch builds on PR4 (and therefore PRs 1–3). The optional
 `persistent-smoke` profile adds the search-server persistence used in the PSC
 development trials. It supports **two H100s and the fixed base-4B proposer**;
-the ordinary runner remains available for the other arms. Real GPU validation
-of this combined candidate is pending. CPU simulations do not establish GPU
-memory fit, kernel compatibility, model quality, or a research result.
+the ordinary runner remains available for the other arms. The isolated PSC
+CPU installation passed, with installed package versions matching the captured
+constraints. Real GPU validation of this combined candidate is pending. CPU
+installation and simulations do not establish GPU memory fit, kernel
+compatibility, model quality, or a research result.
 
 ```bash
 bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
@@ -29,8 +33,11 @@ bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
 The profile runs two cycles, each with one 256-puzzle × 8-attempt training
 batch, a weight update, and one three-candidate search iteration. Each usable
 candidate is scored on 256 puzzles once. The final model/harness is evaluated
-on the held-out 256 puzzles × 8 attempts. This is a validation schedule;
-`h100` retains the separate full-run schedule.
+on the held-out 256 puzzles × 8 attempts. This is a validation schedule. The
+separate `h100` profile selects the team's longer budget: four cycles of
+13 training batches and six search iterations. These are different schedules;
+a successful smoke run would not validate the full research budget or make
+it a direct reproduction of the paper.
 
 Search processes start after cycle 1 training. Before cycle 2 training they
 drain and sleep; a fresh sleep receipt and GPU-memory check gate training.
@@ -39,6 +46,12 @@ caches, and verify full parameter checksums agree and changed. The base
 proposer's checksums must stay fixed. A failed reload disables routing and
 fails the run; no service restart or candidate repair is attempted. Model
 and dataloader state carry between phases; Adam state resets as in PR4.
+
+The training launcher also performs a quick post-update evaluation on the
+first 16 test puzzles, with two attempts each. These samples do not enter
+SFT or the separate 256-puzzle harness-search split, but their metrics are
+observed before the final test. This smoke run verifies execution and is
+not an untouched-test research result.
 
 Invalid candidate Python is skipped and recorded. Missing output consumes
 its requested slot as `rejected_missing`; it is not replaced. Valid candidates
@@ -60,6 +73,8 @@ On Linux, after `setup/install_mock.sh`, run `ladder/mock_run.sh` and
 `ladder/mock_persistent.sh`. The latter checks two cycles with bad Python,
 missing functions and an empty proposal, changing solver weights, unchanged
 server PIDs/proposer weights, checkpoint/harness handoffs, resume, and cleanup.
+The [CPU evidence record](benchmarks/persistent-candidate-cpu.json) separates
+these simulated checks from the real PSC package-installation checks.
 On a Mac, the same Linux checks can run in Docker:
 
 ```bash
@@ -91,8 +106,11 @@ python3 tools/submit_candidate.py --account YOUR_ACCOUNT \
 The CPU setup job selects Python 3.11.18, Claude Code 2.1.197 and the captured
 Linux/CUDA-13 dependency constraints in
 `setup/constraints/psc-py311-cu130.txt`. Constraints were captured from the
-working PSC environment, which passed `pip check`; a clean constrained install
-is still a required validation. CPU setup defers GPU kernel checks.
+working PSC environment. A separate clean environment passed installation
+and `pip check` on 2026-11-02 (setup job `50118625`, 17m19s). Its installed
+package versions matched the constraints, and the patched WHALE source
+matched a reconstruction from the pinned upstream commit and this branch's
+patches. CPU setup defers GPU kernel checks.
 
 The submitter writes `job-config.json` with the paths/revision and passes it
 as a positional argument to both jobs, so startup does not depend on custom
@@ -129,12 +147,14 @@ rung uses the same prompt, the same rules for invalid proposals (logged as
 |---|---|---|---|
 | `mock` | any Linux CPU (cerlab23, PSC) | fakes | does the orchestration work? minutes |
 | `mini4090` | cerlab23, 1 RTX 4090 | Qwen3.5-0.8B | do the real libraries work? about an hour |
+| `persistent-smoke` | PSC, 2 H100s | Qwen3.5-4B | two real-size cycles with persistent search servers; fixed base-4B proposer only |
 | `h100` | PSC, 2 H100s | Qwen3.5-4B | the real runs |
 
 ## Know it works before a real job: the testing ladder
 
 Each layer catches what the cheaper ones cannot; move up only when the layer
-below passes. Nothing here runs on a laptop (the mock scripts refuse macOS).
+below passes. Real model checks run on GPU nodes; Linux CPU mocks can also run
+in Docker on a laptop, as shown above.
 
 | Layer | Command | Where | Catches | Time |
 |---|---|---|---|---|
@@ -142,7 +162,7 @@ below passes. Nothing here runs on a laptop (the mock scripts refuse macOS).
 | 2. Proposer format check | `bash ladder/proposer_format_check.sh ARM mini4090 B1_RUN_DIR` | cerlab23 4090 (DeepSeek via API) | can each proposer write valid candidates | minutes |
 | 3. Replay B1's search | `bash ladder/search_two_gpu.sh OUT B1_CHECKPOINT 1` with `PROFILE=mini4090` | cerlab23 4090 | real model serving, scoring, the search loop | about 20 min |
 | 4. Mini full loop | `bash ladder/run_cycles.sh ARM mini4090` | cerlab23 4090 | real training, checkpoint hand-off, several cycles | about an hour |
-| 5. Tiny 4B confirmation | `ladder/run_cycles.sh ARM h100` with `CYCLES=1 STEPS_PER_CYCLE=1 SEARCH_ITERS=1` | PSC, 2 H100s, interactive | H100 kernels, full-size memory, the 27B proposer | 1 hour |
+| 5. Persistent 4B confirmation | `bash ladder/run_cycles.sh whale_qwen4b persistent-smoke` | PSC, 2 H100s | H100 kernels, real batch sizes, checkpoint reload and server persistence; GPU result pending | measured by this validation |
 | 6. Real runs | `ladder/run_cycles.sh ARM h100` in `sbatch` | PSC | the results | days |
 
 **Layer 1 setup (once, CPU only):**
@@ -169,7 +189,13 @@ INSTALL_PROFILE=mini4090 SKIP_27B=1 bash setup/install.sh   # installs Miniforge
 B1's saved search directory and resume checkpoint come from Sumanth's Hugging
 Face upload (the checkpoint must contain `actor/` and `data.pt`).
 
-## How one cycle runs on 4 H100s
+## Earlier four-GPU execution path
+
+The diagram and operational sections through "Where things are written"
+describe the earlier four-GPU scripts (`run_arm.sh`, `interactive_test.sh`,
+`slurm/smoke.sbatch`). They use different profiles, output paths and completion
+checks. For the two-GPU persistent candidate, use the installation command,
+profile and output layout at the top of this README.
 
 ```text
 weight phase   GPU 0-1  verl FSDP trainer (full fine-tune, online RSFT)

@@ -23,6 +23,21 @@
   ],
   "resume_without_retraining_or_reproposal": true,
   "final_mock_test_passed": true,
+  "isolated_psc_installation": {
+    "revision": "4c73d05357577e08096c780bcff9a8492b492a6f",
+    "setup_job_id": "50118625",
+    "elapsed_seconds": 1039,
+    "separate_from_historical_venv": true,
+    "installed_distribution_count": 297,
+    "pip_check_passed": true,
+    "constraint_sha256": "304aaf9cafd0cfae176ab7cea0d0826515ff5ee533b0f814948ec2a38687a824",
+    "constraint_mismatch_count": 0,
+    "prepared_whale_source_files_compared": 27,
+    "prepared_whale_source_mismatch_count": 0,
+    "unexpected_tracked_whale_modifications": 0,
+    "gpu_kernels_deferred": true,
+    "gpu_preflight": "not yet run"
+  },
   "gpu_validated": false,
   "limits": [
     "No real model generation or training",
