@@ -6,10 +6,31 @@ from pathlib import Path
 import time
 
 
+def load_snapshot(volume):
+    """An updating Volume file may not yet have a coherent external snapshot."""
+    try:
+        return json.loads(b''.join(volume.read_file('/modal-control/live.json')))
+    except (UnicodeError, ValueError):
+        # Older history rows are immutable. Never infer zero progress from an
+        # incomplete latest row; show the actual age of the last valid sample.
+        history = b''.join(volume.read_file('/modal-control/telemetry.jsonl'))
+        for line in reversed(history.splitlines()):
+            try:
+                row = json.loads(line)
+            except (UnicodeError, ValueError):
+                continue
+            if isinstance(row, dict) and 'time' in row:
+                row['snapshot_source'] = 'latest complete telemetry-history row'
+                return row
+        raise RuntimeError('No complete telemetry snapshot is available yet; no rollout count inferred')
+
+
 def describe(live):
     lines = [f"Observed: {live.get('checked_utc', 'unavailable')}"]
     if 'time' in live:
         lines.append(f"Snapshot age: {max(0, time.time()-live['time']):.0f}s")
+    if live.get('snapshot_source'):
+        lines.append('Snapshot source: ' + live['snapshot_source'])
     if live.get('observation_error'):
         lines.append('Observation error: ' + live['observation_error'])
         return '\n'.join(lines)
@@ -53,7 +74,7 @@ def main():
     args = parser.parse_args()
     receipt = json.loads(args.receipt.read_text())
     volume = modal.Volume.from_name(receipt['plan']['results_volume'])
-    live = json.loads(b''.join(volume.read_file('/modal-control/live.json')))
+    live = load_snapshot(volume)
     # Finalization can occur after the last heartbeat; do not present that
     # older heartbeat as evidence the App is still executing.
     live['phase'] = json.loads(b''.join(volume.read_file('/modal-control/status.json')))

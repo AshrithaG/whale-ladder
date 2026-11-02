@@ -13,10 +13,24 @@ sys.path.insert(0,str(ROOT/'setup'))
 from observe_run import snapshot, parse_metrics
 from summarize_cycles import timing_report
 from ladder_rollout_progress import RolloutProgress
-from modal_gpu_status import describe
+from modal_gpu_status import describe, load_snapshot
 
 
 class ObservabilityTests(unittest.TestCase):
+    def test_partial_live_snapshot_falls_back_to_last_complete_history_row(self):
+        valid=dict(time=10,checked_utc='sample',rollouts={})
+        volume=SimpleNamespace(read_file=lambda name: [b'\x00'*20] if name.endswith('live.json')
+            else [(json.dumps(valid)+'\n').encode()+b'{"time":'])
+        result=load_snapshot(volume)
+        self.assertEqual(result['time'],10)
+        self.assertIn('history',result['snapshot_source'])
+        self.assertEqual(result['rollouts'],{})
+
+    def test_incomplete_observations_do_not_become_zero_rollout_counts(self):
+        volume=SimpleNamespace(read_file=lambda _: [b'\x00'])
+        with self.assertRaisesRegex(RuntimeError,'no rollout count inferred'):
+            load_snapshot(volume)
+
     def test_live_attempts_remain_distinct_from_accepted_training_samples(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

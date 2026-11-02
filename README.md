@@ -272,6 +272,9 @@ completed puzzle rollouts. Missing worker snapshots or missing metrics mean
 unavailable observations, not zero work. A readiness check verifies logging
 before model startup; observation errors are recorded explicitly. No observer
 action restarts work or changes experiment decisions.
+If the storage API returns a partially published live snapshot, the status
+reader falls back to the last complete telemetry-history row and shows its
+actual age. It never treats an unreadable snapshot as zero completed attempts.
 
 Worker snapshots live in each training/evaluation phase's `rollout-progress/`;
 completed batch snapshots are retained in `finished/`. Search snapshots are
