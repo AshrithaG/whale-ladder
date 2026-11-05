@@ -26,6 +26,9 @@ fi
 target_step=$((start_step+training_steps))
 case "$mode" in train|eval) ;; *) echo 'HYBRID_MODE must be train or eval' >&2; exit 2 ;; esac
 num_gpus="${HYBRID_NUM_GPUS:-2}"
+# Training uses the baseline environment below. Retain the search backend only
+# for checking resident-server receipts; it does not configure the trainer.
+persistent_search_backend="${PROPOSER_BACKEND:-local}"
 # Training is the same for every arm, so its environment is always rsft_only's.
 export ARM=rsft_only PROFILE="${PROFILE:-smoke}" LADDER_NUM_GPUS="$num_gpus"
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
@@ -114,7 +117,8 @@ cleanup() {
 }
 trap cleanup EXIT
 if [[ -n "${HYBRID_PERSISTENT_SLEEP_RECEIPT:-}" ]]; then
-  python "$LADDER_HOME/tools/persistent_search.py" --check-sleep-receipt "$HYBRID_PERSISTENT_SLEEP_RECEIPT"
+  PROPOSER_BACKEND="$persistent_search_backend" python "$LADDER_HOME/tools/persistent_search.py" \
+    --check-sleep-receipt "$HYBRID_PERSISTENT_SLEEP_RECEIPT"
 else
   wait_gpus_free 120
 fi

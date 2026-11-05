@@ -64,16 +64,38 @@ class AdmissionTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError): validate_sleep_receipt(path)
 
     @patch.dict(os.environ, {'PROPOSER_BACKEND': 'local', 'LADDER_JOB_GPUS': '0,1', 'LADDER_GPU_CHECK': 'skip'})
-    def test_unsupported_proposer_or_topology_refused(self):
-        validate_mode('whale_qwen4b')
-        with self.assertRaises(ValueError): validate_mode('whale_self')
+    def test_supported_arms_and_incompatible_backend_or_topology(self):
+        for arm in ('whale_qwen4b', 'whale_qwen27b', 'whale_self'):
+            validate_mode(arm)
+        with self.assertRaises(ValueError): validate_mode('whale_deepseek')
+        with patch.dict(os.environ, {'PROPOSER_BACKEND': 'api'}):
+            validate_mode('whale_deepseek')
+            with self.assertRaises(ValueError): validate_mode('whale_self')
         with patch.dict(os.environ, {'LADDER_SHARE_ONE_GPU': '1'}):
             with self.assertRaises(ValueError): validate_mode('whale_qwen4b')
+
+    @patch.dict(os.environ, {'SLURM_JOB_ID': '42', 'LADDER_JOB_GPUS': '0,1', 'PROPOSER_BACKEND': 'api'})
+    @patch('persistent_search.memory_guard', return_value=[])
+    def test_api_sleep_receipt_requires_only_the_two_solvers(self, guard):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'receipt.json'
+            receipt = dict(time=time.time(), job_id='42', gpus=['0', '1'], backend='api',
+                           ports={'solver0': 30001, 'solver1': 30002})
+            path.write_text(json.dumps(receipt))
+            with patch('persistent_search.urllib.request.urlopen') as urlopen:
+                urlopen.return_value.__enter__.return_value.read.return_value = b'{"is_sleeping":true}'
+                validate_sleep_receipt(path)
+                self.assertEqual(urlopen.call_count, 2)
+                receipt['backend'] = 'local'
+                path.write_text(json.dumps(receipt))
+                with self.assertRaisesRegex(RuntimeError, 'backend differs'):
+                    validate_sleep_receipt(path)
 
 
 class ReloadTests(unittest.TestCase):
     def trial(self, path):
         obj = object.__new__(PersistentSearch)
+        obj.local_proposer, obj.proposer_tracks_solver = True, False
         obj.signature = checkpoint_signature(path)
         obj.parked, obj.digest, obj.proposer_digest = True, 'old', 'fixed'
         obj.pool = BackendPool(['a', 'b'])
@@ -93,6 +115,43 @@ class ReloadTests(unittest.TestCase):
         obj.sleep = lambda n: obj.calls.append((n, 'sleep', None))
         obj.check_model = lambda n: obj.calls.append((n, 'check', None))
         return obj
+
+    @patch('persistent_search.memory_guard', return_value=[])
+    def test_self_proposer_reloads_and_matches_the_new_solver(self, guard):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = checkpoint(Path(tmp) / 'a')
+            obj = self.trial(p)
+            obj.proposer_tracks_solver = True
+            obj.weight_digest.side_effect = lambda name: 'new'
+            obj.refresh(p)
+            self.assertEqual(obj.proposer_digest, obj.digest)
+            reloads = [name for name, url, _ in obj.calls if url == '/collective_rpc']
+            self.assertEqual(reloads, ['solver0', 'solver1', 'proposer'])
+            self.assertNotIn('proposer', obj.model_checks)
+            self.assertEqual(obj.pool.snapshot()['enabled'], [0])
+
+    @patch('persistent_search.memory_guard', return_value=[])
+    def test_api_arm_reloads_only_solvers_and_enables_both(self, guard):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = checkpoint(Path(tmp) / 'a')
+            obj = self.trial(p)
+            obj.local_proposer = False
+            obj.pids.pop('proposer')
+            obj.processes.pop('proposer')
+            obj.refresh(p)
+            self.assertFalse(any(name == 'proposer' for name, _, _ in obj.calls))
+            self.assertEqual(obj.pool.snapshot()['enabled'], [0, 1])
+
+    @patch('persistent_search.memory_guard', return_value=[])
+    def test_stale_self_proposer_blocks_routing_after_solver_reload(self, guard):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = checkpoint(Path(tmp) / 'a')
+            obj = self.trial(p)
+            obj.proposer_tracks_solver = True
+            obj.weight_digest.side_effect = ['new', 'new', 'old-proposer']
+            with self.assertRaisesRegex(RuntimeError, 'self proposer differs'):
+                obj.refresh(p)
+            self.assertEqual(obj.pool.snapshot()['enabled'], [])
 
     @patch('persistent_search.memory_guard', return_value=[])
     def test_reload_both_and_clear_old_cache_before_enabling_requests(self, guard):

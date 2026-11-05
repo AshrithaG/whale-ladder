@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run on a compute node after installing vLLM. Keep current packages fixed
-# while its official helper adds the matching precompiled FlashInfer kernels.
+# Run on a compute node after installing vLLM. Keep existing dependencies fixed
+# while adding FlashInfer kernels and the pinned causal convolution extension.
 set -euo pipefail
 LADDER_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$LADDER_HOME/ladder/config.env"
@@ -11,8 +11,15 @@ trap 'rm -f "$constraints"' EXIT
 python - <<'PY' > "$constraints"
 from importlib.metadata import distributions
 for d in sorted(distributions(), key=lambda d: d.metadata['Name'].lower()):
-    print(d.metadata['Name'] + '==' + d.version)
+    # Only causal-conv1d itself may change to the explicitly requested pin.
+    if d.metadata['Name'].lower().replace('_', '-') != 'causal-conv1d':
+        print(d.metadata['Name'] + '==' + d.version)
 PY
 PIP_CONSTRAINT="$constraints" vllm download-kernels
+# Build against the installed torch, rather than an isolated build's torch.
+# --no-deps prevents a kernel install from replacing the training environment.
+MAX_JOBS="${MAX_JOBS:-4}" PIP_CONSTRAINT="$constraints" python -m pip install --no-build-isolation --no-deps \
+  -r "$LADDER_HOME/setup/constraints/gpu-kernels.txt"
+python "$LADDER_HOME/setup/check_causal_conv1d.py"
 python -m pip check
 python -m pip freeze > "$LADDER_ROOT/pip-freeze.txt"

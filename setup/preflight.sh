@@ -41,6 +41,7 @@ check "verl trainer imports" python -c 'import verl.trainer.main_textarena_disag
 check "chess agent-loop imports" python -c 'import verl.experimental.agent_loop.chess_puzzle_agent_loop'
 check "disaggregated FSDP worker imports" python -c 'import verl.workers.disagg_fsdp_workers'
 check "training padding forward/backward" python "$LADDER_HOME/setup/check_padding_backend.py"
+check "compiled causal-conv1d forward/backward" python "$LADDER_HOME/setup/check_causal_conv1d.py"
 check "vLLM rollout integration imports" python -c 'import verl.workers.rollout.vllm_rollout.vllm_async_server'
 check "streamed tied-weight validation" python "$LADDER_HOME/setup/check_streamed_weights.py"
 check "NCCL checkpoint backend available" python "$LADDER_HOME/setup/check_checkpoint_backend.py"

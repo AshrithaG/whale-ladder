@@ -1,4 +1,5 @@
-"""Prove controller lifetime is independent of startup/worker success."""
+"""Exercise allocation release, bounded diagnosis and manual retries in Bash."""
+from contextlib import contextmanager
 import json
 import os
 import signal
@@ -20,44 +21,98 @@ class ControllerTests(unittest.TestCase):
             time.sleep(.03)
         self.fail('Controller did not reach the expected state')
 
-    def check_hold(self, worker_result, missing_config=False):
+    @contextmanager
+    def controller(self, worker_result=17, missing_config=False, hold_seconds='0'):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake = root / 'bin'
             fake.mkdir()
-            counter = root / 'worker-calls'
-            (fake / 'srun').write_text('#!/bin/bash\nprintf "called\\n" >> "$TEST_COUNTER"\nexit "$TEST_RESULT"\n')
+            counter, result = root / 'worker-calls', root / 'worker-result'
+            result.write_text(str(worker_result))
+            (fake / 'srun').write_text('#!/bin/bash\nprintf "called\\n" >> "$TEST_COUNTER"\nexit "$(cat "$TEST_RESULT_FILE")"\n')
             (fake / 'srun').chmod(0o755)
             config = root / 'job-config.json'
-            if not missing_config: config.write_text('{}')
+            if not missing_config:
+                config.write_text('{}')
             env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ['PATH'],
                        SLURM_SUBMIT_DIR=str(ROOT), SLURM_JOB_ID='controller-test',
-                       TEST_COUNTER=str(counter), TEST_RESULT=str(worker_result))
-            env.pop('LADDER_ROOT', None)
+                       TEST_COUNTER=str(counter), TEST_RESULT_FILE=str(result),
+                       LADDER_FAILURE_HOLD_SECONDS=hold_seconds)
             with (root / 'output').open('w') as log:
                 proc = subprocess.Popen(['bash', str(ROOT / 'slurm/candidate_validate.sbatch'), str(config)],
                                         env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 try:
-                    status = root / 'jobs/candidate-controller-test/status'
-                    self.wait_for(lambda: status.exists() and 'allocation retained' in status.read_text())
-                    self.assertIsNone(proc.poll(), 'Controller exited and would release the allocation')
-                    self.assertIn('exit=' + str(2 if missing_config else worker_result), status.read_text())
-                    if not missing_config:
-                        self.assertEqual(counter.read_text().splitlines(), ['called'])
-                        time.sleep(.1)
-                        self.assertEqual(counter.read_text().splitlines(), ['called'], 'Unexpected automatic retry')
+                    yield root, proc, counter
                 finally:
-                    os.killpg(proc.pid, signal.SIGTERM)
+                    if proc.poll() is None:
+                        os.killpg(proc.pid, signal.SIGTERM)
                     proc.wait(timeout=3)
 
-    def test_worker_failure_retains_allocation_without_automatic_retry(self):
-        self.check_hold(17)
+    def status(self, root):
+        return root / 'jobs/candidate-controller-test/status'
 
-    def test_worker_success_retains_allocation(self):
-        self.check_hold(0)
+    def test_success_releases_even_when_failure_hold_is_enabled(self):
+        with self.controller(worker_result=0, hold_seconds='1200') as (root, proc, counter):
+            self.assertEqual(proc.wait(timeout=3), 0)
+            self.assertIn('PASSED', self.status(root).read_text())
+            self.assertIn('allocation released', self.status(root).read_text())
+            self.assertEqual(counter.read_text().splitlines(), ['called'])
 
-    def test_missing_startup_configuration_retains_allocation(self):
-        self.check_hold(0, missing_config=True)
+    def test_worker_failure_releases_and_preserves_exit_code_by_default(self):
+        with self.controller() as (root, proc, counter):
+            self.assertEqual(proc.wait(timeout=3), 17)
+            self.assertIn('exit=17; allocation released', self.status(root).read_text())
+            self.assertEqual(counter.read_text().splitlines(), ['called'])
+
+    def test_bootstrap_failure_releases_by_default(self):
+        with self.controller(missing_config=True) as (root, proc, counter):
+            self.assertEqual(proc.wait(timeout=3), 2)
+            self.assertIn('exit=2; allocation released', self.status(root).read_text())
+            self.assertFalse(counter.exists())
+
+    def test_opt_in_failure_hold_expires_without_automatic_retry(self):
+        with self.controller(hold_seconds='2') as (root, proc, counter):
+            status = self.status(root)
+            self.wait_for(lambda: status.exists() and 'allocation retained' in status.read_text())
+            self.assertIsNone(proc.poll())
+            self.assertEqual(proc.wait(timeout=4), 17)
+            self.assertIn('hold expired', status.read_text())
+            self.assertEqual(counter.read_text().splitlines(), ['called'])
+
+    def test_bootstrap_diagnosis_is_also_bounded(self):
+        with self.controller(missing_config=True, hold_seconds='1') as (root, proc, counter):
+            self.assertEqual(proc.wait(timeout=3), 2)
+            self.assertIn('hold expired', self.status(root).read_text())
+            self.assertFalse(counter.exists())
+
+    def test_manual_retry_can_succeed_and_releases_immediately(self):
+        with self.controller(hold_seconds='1200') as (root, proc, counter):
+            status = self.status(root)
+            self.wait_for(lambda: status.exists() and 'allocation retained' in status.read_text())
+            (root / 'worker-result').write_text('0')
+            (status.parent / 'retry').touch()
+            self.assertEqual(proc.wait(timeout=3), 0)
+            self.assertEqual(counter.read_text().splitlines(), ['called', 'called'])
+            self.assertIn('PASSED', status.read_text())
+
+    def test_failed_retry_does_not_reset_diagnosis_deadline(self):
+        with self.controller(hold_seconds='3') as (root, proc, counter):
+            status = self.status(root)
+            self.wait_for(lambda: status.exists() and 'allocation retained' in status.read_text())
+            first = status.read_text().split('until elapsed=')[1].split('s;')[0]
+            (status.parent / 'retry').touch()
+            self.wait_for(lambda: len(counter.read_text().splitlines()) == 2)
+            self.wait_for(lambda: status.exists() and 'allocation retained' in status.read_text())
+            self.assertEqual(status.read_text().split('until elapsed=')[1].split('s;')[0], first)
+            self.assertEqual(proc.wait(timeout=4), 17)
+            self.assertEqual(counter.read_text().splitlines(), ['called', 'called'])
+
+    def test_invalid_or_excessive_hold_is_rejected(self):
+        for value in ('-1', '1201', 'forever'):
+            with self.subTest(value=value), self.controller(hold_seconds=value) as (root, proc, counter):
+                self.assertEqual(proc.wait(timeout=3), 2)
+                self.assertIn('0 to 1200', (root / 'output').read_text())
+                self.assertFalse(counter.exists())
 
     def test_explicit_configuration_quotes_paths_without_shell_execution(self):
         with tempfile.TemporaryDirectory() as tmp:

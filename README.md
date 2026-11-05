@@ -76,10 +76,15 @@ Move right only when the current layer passes; details and commands are in the t
 
 ## Candidate: persistent two-GPU validation
 
-PRs 1–4 are merged into `main`. The optional `persistent-smoke` profile adds
-search-server persistence to that shared runner. It supports **two H100s and
-the fixed base-4B proposer**; the ordinary `h100` runner remains available for
-all arms and does not enable cross-cycle persistence by default.
+PRs 1–4 are merged into `main`. `run_cycles.sh` now invokes one
+`tools/cycle_controller.py` for every arm. The `h100` and `persistent-smoke`
+profiles retain search servers across cycles on **two H100s**. Fixed 4B/27B
+proposers stay frozen; the self proposer reloads with the solver; the API arm
+retains only two local solver servers; `rsft_only` starts no search servers.
+Set `LADDER_PERSISTENT_SEARCH=0` with `h100` to exercise restart mode through
+the same controller. Each arm still needs a short real-GPU validation before
+comparative research runs; simulated model RPCs cannot establish GPU memory
+fit, CUDA compatibility, or real-model checkpoint reload correctness.
 
 The [November 2 PSC trial](benchmarks/psc-validation-20261102.json) completed
 cycle 1 with real models: 2,048 training rollouts, 89 accepted samples, two
@@ -88,17 +93,19 @@ Cycle 2 generated all 2,048 rollouts with 291 positive scores, but the two-hour
 allocation expired during its weight update. No cycle 2 checkpoint was saved.
 **Full GPU validation remains incomplete:** checkpoint refresh into the same
 search servers, the second search and final evaluation have not been verified.
-Other proposer arms and the full research schedule need their own GPU checks.
+The new shared controller, its extended proposer policies, and the full
+research schedule need their own GPU checks.
 These partial results establish execution progress, not a research conclusion.
 
 For team use, start with a short run for the intended arm and the shared data
-fingerprint before committing the longer `h100` budget. Keep cross-cycle
-persistence opt-in until its full two-cycle validation passes. The PSC
+fingerprint before committing the longer `h100` budget. The PSC
 submitter below requests four hours; the interrupted trial reused an existing
 two-hour allocation and is not a measurement of a complete validation's runtime.
 
 ```bash
 bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
+# The same short schedule is available for each intended arm:
+# bash ladder/run_cycles.sh whale_self persistent-smoke
 ```
 
 The profile runs two cycles, each with one 256-puzzle × 8-attempt training
@@ -113,8 +120,10 @@ it a direct reproduction of the paper.
 Search processes start after cycle 1 training. Before cycle 2 training they
 drain and sleep; a fresh sleep receipt and GPU-memory check gate training.
 After training, both solver replicas reload the new checkpoint, clear prefix
-caches, and verify full parameter checksums agree and changed. The base
-proposer's checksums must stay fixed. A failed reload disables routing and
+caches, and verify full parameter checksums agree and changed. Frozen
+proposers' checksums must stay fixed. The self proposer must reload and match
+the new solver checksum. The API arm has no local proposer to reload, and
+both solvers stay awake during search. A failed reload disables routing and
 fails the run; no service restart or candidate repair is attempted. Model
 and dataloader state carry between phases; Adam state resets as in PR4.
 
@@ -137,17 +146,26 @@ assuming a consecutive range such as `h1` through `h6`.
 Outputs use PR4's `$OUT_ROOT/cycles/<arm>-<profile>-s<seed>/` layout. Search
 receipts record evaluated/rejected/missing counts, server PIDs, checksums and
 the original server-log directory. Each invocation records source hashes.
-Completed phases may be reused with the same plan and incoming state;
+Completed phases may be reused with the same `cycle-plan.json` and incoming state;
 unfinished phases are preserved under `.unfinished-*` and rerun. There is no
-in-place candidate repair or partial-search recovery.
+in-place candidate repair or partial-search recovery. Use a fresh output root
+when switching lifecycle mode or migrating outputs from the older controllers;
+the shared controller rejects unversioned or mismatched saved plans.
 
 ### CPU validation
 
 On Linux, after `setup/install_mock.sh`, run `ladder/mock_run.sh` and
-`ladder/mock_persistent.sh`. The latter checks two cycles with an unassigned
+`ladder/mock_persistent.sh`. The first runs all five arms in restart mode.
+The latter checks two persistent cycles with an unassigned
 numbered folder, missing functions and an empty proposal, changing solver
 weights, unchanged server PIDs/proposer weights, checkpoint/harness handoffs,
-resume, and cleanup.
+resume, and cleanup, then exercises the API, frozen 27B, self and training-only
+arms through the same controller. All model responses and training are fakes.
+The [shared-controller CPU evidence](benchmarks/shared-controller-cpu.json)
+records 68 passing Linux unit tests, the 56-check restart-mode audit, and
+all-arm persistent-cycle checks. It preserves the failed backend-handoff
+attempt separately from the successful corrected run. GPU validation remains
+pending.
 The [CPU evidence record](benchmarks/persistent-candidate-cpu.json) separates
 these simulated checks from the real PSC package-installation checks.
 On a Mac, the same Linux checks can run in Docker:
@@ -196,13 +214,17 @@ submissions. `--setup-only` submits just the CPU job.
 GPU validation has an `afterok:<setup-job-id>` dependency. It requests two
 H100s for four hours, checks GPU kernels and preflight, then runs the two
 cycles and final test. Its control directory is
-`$LADDER_ROOT/jobs/candidate-<job-id>/`. Failure retains the allocation until
-wall time for diagnosis; creating `retry` in that directory requests another
-attempt. Success also retains the allocation for inspection/further work.
-The allocation owner launches the worker in a separate `srun` step; early
-configuration errors are caught by its exit guard. Slurm deadlines, node
-failure, preemption or a job-level kill can still end an allocation. It never
-cancels another job. Submit
+`$LADDER_ROOT/jobs/candidate-<job-id>/`. Success releases the allocation
+immediately. Failure, including missing startup configuration, also releases
+it by default and preserves the worker's nonzero exit code.
+For an interactive diagnosis session only, set
+`LADDER_FAILURE_HOLD_SECONDS=1200` before submission (allowed range: 0–1200,
+default: 0). During that hold, creating `retry` in the control directory
+requests another attempt. There are no automatic retries. All diagnosis holds
+share one deadline measured from the first failure; manual retries cannot
+reset it. Successful retries exit immediately. Slurm's own deadline can end
+the allocation earlier. The allocation owner launches the worker in a separate
+`srun` step and never cancels another job. Submit
 from a clean checkout: validation requires the prepared and running code
 revisions to match.
 
@@ -239,8 +261,10 @@ cycle runner. Its default action only checks local source identity and prints
 a plan; it starts no Modal App. The default saved image runs experiment code
 at `877a4f4`, while the wrapper is serialized separately and retained with its
 source hashes. Changes to the image's experiment files are rejected before
-launch. A teammate using their own prepared image can pass `--cpu-receipt`
-with the JSON returned by `tools/modal_candidate.py`.
+launch. The default image ID belongs to the original author's Modal workspace;
+teammates must use `--cpu-receipt` with their own successful preparation JSON
+from `tools/modal_candidate.py` (or `tools/modal_gpu_image.py` with their own
+`--base-image`). Usage is billed to the Modal workspace that launches the run.
 
 ```bash
 # In the isolated Modal client environment (modal==1.6.3), from a clean commit:
@@ -407,8 +431,22 @@ rung uses the same prompt, the same rules for invalid proposals (logged as
 |---|---|---|---|
 | `mock` | any Linux CPU (cerlab23, PSC) | fakes | does the orchestration work? minutes |
 | `mini4090` | cerlab23, 1 RTX 4090 | Qwen3.5-0.8B | do the real libraries work? about an hour |
-| `persistent-smoke` | PSC, 2 H100s | Qwen3.5-4B | two real-size cycles with persistent search servers; fixed base-4B proposer only |
+| `persistent-smoke` | PSC, 2 H100s | Qwen3.5-4B | two real-size cycles with persistent search servers; per-arm GPU validation required |
 | `h100` | PSC, 2 H100s | Qwen3.5-4B | the real runs |
+
+The `h100` profile requests two H100s for every arm. Both GPUs generate training
+rollouts and then participate in the weight update. During search, each GPU
+serves one solver replica. Local proposers (4B, 27B and self) take turns with
+the second solver on GPU 1 through sleep/wake; API proposers need no local
+proposer server. The 27B proposer uses one GPU in this layout; its memory fit
+and the complete cycle for each arm still require GPU validation. `rsft_only`
+uses the same training budget with no harness search.
+
+All arms use the same cycle controller for training, checkpoint/harness
+handoffs, resume checks and final evaluation. Persistence controls server
+lifetime within that controller. Use the same schedule, dataset and lifecycle
+policy for comparative proposer runs, after short GPU validation for each
+configuration. The training-only baseline naturally omits harness search.
 
 ## Know it works before a real job: the testing ladder
 
@@ -422,7 +460,7 @@ in Docker on a laptop, as shown above.
 | 2. Proposer format check | `bash ladder/proposer_format_check.sh ARM mini4090 B1_RUN_DIR` | cerlab23 4090 (DeepSeek via API) | can each proposer write valid candidates | minutes |
 | 3. Replay B1's search | `bash ladder/search_two_gpu.sh OUT B1_CHECKPOINT 1` with `PROFILE=mini4090` | cerlab23 4090 | real model serving, scoring, the search loop | about 20 min |
 | 4. Mini full loop | `bash ladder/run_cycles.sh ARM mini4090` | cerlab23 4090 | real training, checkpoint hand-off, several cycles | about an hour |
-| 5. Persistent 4B confirmation | `bash ladder/run_cycles.sh whale_qwen4b persistent-smoke` | PSC, 2 H100s | H100 kernels, real batch sizes, checkpoint reload and server persistence; GPU result pending | measured by this validation |
+| 5. Per-arm persistent confirmation | `bash ladder/run_cycles.sh ARM persistent-smoke` | PSC, 2 H100s | H100 kernels, real batch sizes, checkpoint reload and server persistence; GPU result pending | measured by this validation |
 | 6. Real runs | `ladder/run_cycles.sh ARM h100` in `sbatch` | PSC | the results | days |
 
 **Layer 1 setup (once, CPU only):**
@@ -454,8 +492,10 @@ Face upload (the checkpoint must contain `actor/` and `data.pt`).
 The diagram and operational sections through "Where things are written"
 describe the earlier four-GPU scripts (`run_arm.sh`, `interactive_test.sh`,
 `slurm/smoke.sbatch`). They use different profiles, output paths and completion
-checks. For the two-GPU persistent candidate, use the installation command,
-profile and output layout at the top of this README.
+checks. `tiny` and `smoke` still require four GPUs: do not reduce those scripts'
+GPU requests to two. They are not launchers for the two-GPU `h100` profile.
+Use `run_cycles.sh ARM h100` for the current two-GPU path, or the explicit
+persistent validation command above for the intended arm.
 
 ```text
 weight phase   GPU 0-1  verl FSDP trainer (full fine-tune, online RSFT)
@@ -469,7 +509,7 @@ harness phase  pre-hook: merge checkpoint to HF format, serve it as the solver,
                post-hook: stop all servers, free the GPUs
 ```
 
-GPU split in the harness phase: `deepseek` solver on 4 GPUs; `qwen27b` solver
+Legacy four-GPU harness split: `deepseek` solver on 4 GPUs; `qwen27b` solver
 on 2, proposer on 2; `qwen4b` and `self` solver on 3, proposer on 1.
 
 ## Before you start
@@ -631,7 +671,15 @@ FlashAttention is absent. Padding fallback does not supply attention kernels.
 
 The NCCL weight-transfer path needs CuPy matching PyTorch's CUDA runtime. Its
 installer constrains installed packages while adding the missing dependency.
-The kernel installer obtains matching precompiled kernels through vLLM's helper.
+The kernel installer obtains matching precompiled kernels through vLLM's helper
+and installs `causal-conv1d==1.7.0` from `setup/constraints/gpu-kernels.txt` with
+build isolation and dependency replacement disabled. This is a new GPU-stage
+requirement, separate from the captured November 2 CPU package inventory.
+Its [upstream release](https://github.com/Dao-AILab/causal-conv1d/tree/v1.7.0)
+supports CUDA 13 builds; compatibility with this project's exact stack remains
+pending until GPU preflight passes. The installer and preflight both require
+the compiled extension and check FP32/BF16 forward/backward against PyTorch.
+An import alone does not establish execution compatibility or a speedup.
 `ladder/config.env` selects Conda's C++ runtime and optionally loads the PSC GCC
 module specified by `LADDER_GCC_MODULE`; persist that setting in your job environment
 or site configuration so subsequent launches use the same compiler.
@@ -656,10 +704,11 @@ Dependency-free regression tests: `python3 -m unittest discover -s tests -v`.
 
 ### Runtime diagnostics
 
-- **Trainer out of memory:** the profiles in this branch allocate four GPUs.
-  Two-GPU full fine-tuning needs a separately validated memory configuration;
-  the legacy `FSDP_OPTIM_OFFLOAD` flag alone did not prevent Adam initialization
-  from exhausting GPU memory in development trials.
+- **Trainer out of memory:** `h100` and `persistent-smoke` use the shared
+  two-GPU training configuration with native CPU optimizer offload; the legacy
+  `tiny`/`smoke` profiles use four GPUs. Check that the launcher matches the
+  profile. The legacy `FSDP_OPTIM_OFFLOAD` flag alone did not prevent Adam
+  initialization from exhausting GPU memory in development trials.
 - **Ray hangs at startup:** too few CPUs for the agent workers. Lower `AGENT_NUM_WORKERS` in the profile.
 - **Proposer check fails on tool calls:** check the vLLM tool-call / reasoning parser names for the model and set `TOOL_CALL_PARSER` / `REASONING_PARSER` in `config.env`.
 - **Proposer check fails with a context error (small models):** lower `PROPOSER_MAX_MODEL_LEN` only if the model cannot serve it. Claude Code's system prompt plus the skill file is long, and a 4B failing here is itself a result: it is logged separately from bad edits.
@@ -766,6 +815,12 @@ three-candidate round, including switching, took 559.71 seconds with server
 restarts and 393.70 seconds with sleep/wake. Each switch fell from approximately
 64–72 seconds to less than one second. These measurements exclude initial model
 startup and proposing, and do not establish a matched one-GPU/two-GPU speedup.
+Both cycle lifecycle modes already use this within-search sleep/wake behavior.
+The incremental cross-cycle benefit is not yet measured: the November 2 trial
+spent 314.38 seconds starting and checking three servers, but timed out before
+completing the next checkpoint refresh. Persistence aims to replace repeated
+startup with park/reload/checksum work; a complete matched run is needed to
+measure net savings.
 
 The historical timings above do not validate this combined candidate on H100s.
 PR4 records invalid Python and missing harness functions as rejected proposals;

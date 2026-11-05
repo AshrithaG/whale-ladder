@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Failures return to the allocation-retaining outer Slurm controller.
+# Failures return to the outer Slurm controller, which releases by default.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exports="$(python3 "$repo/setup/load_candidate_config.py" "${1:?job configuration required}")"
 eval "$exports"
 cd "$LADDER_CODE_DIR"
-git diff --quiet && git diff --cached --quiet
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo 'Candidate checkout is dirty; commit or stash tracked changes before validation' >&2
+  exit 2
+fi
 [[ "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" ]] || { echo 'Unexpected candidate code revision' >&2; exit 2; }
 installed="$(cat "$LADDER_ROOT/installed-revision")"
 if [[ "$installed" != "$EXPECTED_REVISION" ]]; then

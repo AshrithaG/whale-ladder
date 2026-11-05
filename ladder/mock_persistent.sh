@@ -23,3 +23,11 @@ bash "$LADDER_HOME/ladder/run_cycles.sh" whale_qwen4b mock-persistent > "$MOCK_S
 # Finished phases must be reusable without generating or training again.
 bash "$LADDER_HOME/ladder/run_cycles.sh" whale_qwen4b mock-persistent > "$MOCK_STATE_DIR/resume.log" 2>&1
 python "$MOCK/check_persistent.py" "$OUT_ROOT/cycles/whale_qwen4b-mock-persistent-s7" "$MOCK_STATE_DIR"
+
+# The same controller also covers frozen 27B, self, API and training-only arms.
+export MOCK_PROPOSER_PLAN_DEEPSEEK=good MOCK_PROPOSER_PLAN_QWEN27B=good MOCK_PROPOSER_PLAN_SELF=good
+for arm in rsft_only whale_deepseek whale_qwen27b whale_self; do
+  bash "$LADDER_HOME/ladder/run_cycles.sh" "$arm" mock-persistent > "$MOCK_STATE_DIR/$arm.log" 2>&1
+  bash "$LADDER_HOME/ladder/run_cycles.sh" "$arm" mock-persistent > "$MOCK_STATE_DIR/$arm-resume.log" 2>&1
+done
+python "$MOCK/check_shared_controller.py" "$OUT_ROOT/cycles" "$MOCK_STATE_DIR"

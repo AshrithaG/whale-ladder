@@ -1,0 +1,4 @@
+# Added after the November 2 CPU environment capture; installed on GPU nodes.
+# Upstream CUDA 13 support: https://github.com/Dao-AILab/causal-conv1d/tree/v1.7.0
+# Compatibility with this project's torch/CUDA stack must pass GPU preflight.
+causal-conv1d==1.7.0

@@ -1,5 +1,6 @@
 #!/bin/bash
-# One-cycle smoke test of one arm on 4 H100s.
+# Legacy one-cycle smoke test on 4 H100s (smoke profile + run_arm.sh).
+# Do not use this launcher for the two-GPU h100/run_cycles.sh path.
 #
 #   sbatch -A <psc-account> slurm/smoke.sbatch whale_deepseek
 #

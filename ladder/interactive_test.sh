@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stage 1 of the pipeline: tiny end-to-end test in an interactive GPU session.
+# Legacy four-GPU tiny test (tiny profile + run_arm.sh).
+# For the current two-GPU path use run_cycles.sh with its own profile.
 #
 #   # on a login node, inside tmux so a dropped connection does not kill it:
 #   tmux new -s ladder
