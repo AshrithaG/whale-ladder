@@ -1,0 +1,6 @@
+.git
+**/__pycache__
+**/*.egg-info
+ladder/secrets.env
+validation_results
+.candidate-control

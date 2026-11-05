@@ -2,8 +2,10 @@
 
 Runs WHALE's chess experiment (Qwen3.5-4B, Lichess puzzles) with the harness
 proposer swapped across a ladder of models, to test whether a small model can
-improve its own agent. Everything else (data, training, scoring, the Claude Code
-proposer scaffold and its skill files) stays as WHALE released it.
+improve its own agent. Model revisions, data fingerprints and the Claude Code
+proposer scaffold are fixed across arms. Profiles select the training/search
+budget and GPU layout; the PSC compatibility and execution changes are
+described below.
 
 | Arm | Proposer model | Where the proposer runs |
 |---|---|---|
@@ -72,6 +74,347 @@ flowchart LR
 
 Move right only when the current layer passes; details and commands are in the testing-ladder section below.
 
+## Candidate: persistent two-GPU validation
+
+PRs 1–4 are merged into `main`. `run_cycles.sh` now invokes one
+`tools/cycle_controller.py` for every arm. The `h100` and `persistent-smoke`
+profiles retain search servers across cycles on **two H100s**. Fixed 4B/27B
+proposers stay frozen; the self proposer reloads with the solver; the API arm
+retains only two local solver servers; `rsft_only` starts no search servers.
+Set `LADDER_PERSISTENT_SEARCH=0` with `h100` to exercise restart mode through
+the same controller. Each arm still needs a short real-GPU validation before
+comparative research runs; simulated model RPCs cannot establish GPU memory
+fit, CUDA compatibility, or real-model checkpoint reload correctness.
+
+The [November 2 PSC trial](benchmarks/psc-validation-20261102.json) completed
+cycle 1 with real models: 2,048 training rollouts, 89 accepted samples, two
+optimizer updates, a saved checkpoint and a full three-slot harness search.
+Cycle 2 generated all 2,048 rollouts with 291 positive scores, but the two-hour
+allocation expired during its weight update. No cycle 2 checkpoint was saved.
+**Full GPU validation remains incomplete:** checkpoint refresh into the same
+search servers, the second search and final evaluation have not been verified.
+The new shared controller, its extended proposer policies, and the full
+research schedule need their own GPU checks.
+These partial results establish execution progress, not a research conclusion.
+
+For team use, start with a short run for the intended arm and the shared data
+fingerprint before committing the longer `h100` budget. The PSC
+submitter below requests four hours; the interrupted trial reused an existing
+two-hour allocation and is not a measurement of a complete validation's runtime.
+
+```bash
+bash ladder/run_cycles.sh whale_qwen4b persistent-smoke
+# The same short schedule is available for each intended arm:
+# bash ladder/run_cycles.sh whale_self persistent-smoke
+```
+
+The profile runs two cycles, each with one 256-puzzle × 8-attempt training
+batch, a weight update, and one three-candidate search iteration. Each usable
+candidate is scored on 256 puzzles once. The final model/harness is evaluated
+on the held-out 256 puzzles × 8 attempts. This is a validation schedule. The
+separate `h100` profile selects the team's longer budget: four cycles of
+13 training batches and six search iterations. These are different schedules;
+a successful smoke run would not validate the full research budget or make
+it a direct reproduction of the paper.
+
+Search processes start after cycle 1 training. Before cycle 2 training they
+drain and sleep; a fresh sleep receipt and GPU-memory check gate training.
+After training, both solver replicas reload the new checkpoint, clear prefix
+caches, and verify full parameter checksums agree and changed. Frozen
+proposers' checksums must stay fixed. The self proposer must reload and match
+the new solver checksum. The API arm has no local proposer to reload, and
+both solvers stay awake during search. A failed reload disables routing and
+fails the run; no service restart or candidate repair is attempted. Model
+and dataloader state carry between phases; Adam state resets as in PR4.
+
+The training launcher also performs a quick post-update evaluation on the
+first 16 test puzzles, with two attempts each. These samples do not enter
+SFT or the separate 256-puzzle harness-search split, but their metrics are
+observed before the final test. This smoke run verifies execution and is
+not an untouched-test research result.
+
+Invalid candidate Python is skipped and recorded. Missing output consumes
+its requested slot as `rejected_missing`; it is not replaced. Valid candidates
+are evaluated; an entirely invalid iteration keeps the incumbent. PR4's
+manifest-name aliases and recovery from malformed manifests are retained.
+Metadata errors are recorded separately from requested-slot counts. Scoring
+and infrastructure failures still fail the run.
+WHALE assigns slot names after existing numbered folders, so names can have
+gaps. Slot accounting uses the iteration and its assigned names, rather than
+assuming a consecutive range such as `h1` through `h6`.
+
+Outputs use PR4's `$OUT_ROOT/cycles/<arm>-<profile>-s<seed>/` layout. Search
+receipts record evaluated/rejected/missing counts, server PIDs, checksums and
+the original server-log directory. Each invocation records source hashes.
+Completed phases may be reused with the same `cycle-plan.json` and incoming state;
+unfinished phases are preserved under `.unfinished-*` and rerun. There is no
+in-place candidate repair or partial-search recovery. Use a fresh output root
+when switching lifecycle mode or migrating outputs from the older controllers;
+the shared controller rejects unversioned or mismatched saved plans.
+
+### CPU validation
+
+On Linux, after `setup/install_mock.sh`, run `ladder/mock_run.sh` and
+`ladder/mock_persistent.sh`. The first runs all five arms in restart mode.
+The latter checks two persistent cycles with an unassigned
+numbered folder, missing functions and an empty proposal, changing solver
+weights, unchanged server PIDs/proposer weights, checkpoint/harness handoffs,
+resume, and cleanup, then exercises the API, frozen 27B, self and training-only
+arms through the same controller. All model responses and training are fakes.
+The [shared-controller CPU evidence](benchmarks/shared-controller-cpu.json)
+records 68 passing Linux unit tests, the 56-check restart-mode audit, and
+all-arm persistent-cycle checks. It preserves the failed backend-handoff
+attempt separately from the successful corrected run. GPU validation remains
+pending.
+The [CPU evidence record](benchmarks/persistent-candidate-cpu.json) separates
+these simulated checks from the real PSC package-installation checks.
+On a Mac, the same Linux checks can run in Docker:
+
+```bash
+docker build -f tests/mock/Dockerfile -t whale-ladder-cpu .
+mkdir -p /tmp/whale-ladder-cpu-results
+docker run --rm --cpus=4 --memory=4g \
+  --mount type=bind,source=/tmp/whale-ladder-cpu-results,target=/results \
+  whale-ladder-cpu
+```
+
+Use a fresh results directory for an independent run. All model serving,
+training and API calls in these mocks are simulated; no provider credits are
+used. Logs are retained in the results directory.
+
+### Isolated PSC installation
+
+Use a new installation root. Existing models and the exact shared dataset
+can be reused as inputs while Python packages and patched WHALE remain
+separate from the historical installation:
+
+```bash
+python3 tools/submit_candidate.py --account YOUR_ACCOUNT \
+  --root /absolute/path/to/new-candidate-work \
+  --model-cache /absolute/path/to/existing/hf \
+  --data-from /absolute/path/to/shared/parquet-files \
+  --fingerprint SHARED_DATASET_FINGERPRINT
+```
+
+The CPU setup job selects Python 3.11.18, Claude Code 2.1.197 and the captured
+Linux/CUDA-13 dependency constraints in
+`setup/constraints/psc-py311-cu130.txt`. Constraints were captured from the
+working PSC environment. A separate clean environment passed installation
+and `pip check` on 2026-11-02 (runtime `f6b60cd`, setup job `50120240`, 13m23s). Its installed
+package versions matched the constraints, and the patched WHALE source
+matched a reconstruction from the pinned upstream commit and this branch's
+patches. CPU setup defers GPU kernel checks.
+
+The submitter writes `job-config.json` with the paths/revision and passes it
+as a positional argument to both jobs, so startup does not depend on custom
+variables surviving Slurm's environment export. `latest-submission.json`
+records both job IDs; an existing record prevents accidental duplicate
+submissions. `--setup-only` submits just the CPU job.
+
+GPU validation has an `afterok:<setup-job-id>` dependency. It requests two
+H100s for four hours, checks GPU kernels and preflight, then runs the two
+cycles and final test. Its control directory is
+`$LADDER_ROOT/jobs/candidate-<job-id>/`. Success releases the allocation
+immediately. Failure, including missing startup configuration, also releases
+it by default and preserves the worker's nonzero exit code.
+For an interactive diagnosis session only, set
+`LADDER_FAILURE_HOLD_SECONDS=1200` before submission (allowed range: 0–1200,
+default: 0). During that hold, creating `retry` in the control directory
+requests another attempt. There are no automatic retries. All diagnosis holds
+share one deadline measured from the first failure; manual retries cannot
+reset it. Successful retries exit immediately. Slurm's own deadline can end
+the allocation earlier. The allocation owner launches the worker in a separate
+`srun` step and never cancels another job. Submit
+from a clean checkout: validation requires the prepared and running code
+revisions to match.
+
+### CPU-only preparation on Modal
+
+With Python 3.14 and the `modal==1.6.3` client connected to your workspace,
+run from a clean, published checkout:
+
+```bash
+python tools/modal_candidate.py --data /path/to/the/shared/parquets \
+  --fingerprint SHARED_DATASET_FINGERPRINT --output /tmp/whale-ladder-modal-cpu.json
+```
+
+This verifies and uploads the three existing parquet files, builds a cached
+CUDA-13/Ubuntu image using the existing installer and package constraints,
+and caches the pinned 4B weights in a Modal Volume. All preparation functions
+use CPUs; no GPU function is defined or launched. CPU/memory and applicable
+storage charges still apply. The receipt records the image ID, code revision,
+package versions, compiler and dataset checks, and explicitly leaves GPU
+validation pending. The `modal-smoke` profile uses the same experiment as
+`persistent-smoke`, with the container's compiler replacing PSC modules.
+GPU execution is a separate step; this command does not run the experiment.
+
+The [Modal CPU evidence](benchmarks/modal-candidate-cpu.json) records a clean
+installation at `877a4f4` on 2026-11-02: 297 installed packages, zero constraint
+mismatches, the exact PSC dataset, and pinned 4B weights. A second CPU container
+successfully reopened the saved image and model Volume. H100 validation remains
+pending; this establishes CPU preparation and cache reuse only.
+
+### First Modal GPU validation (launch requires spending approval)
+
+`tools/modal_gpu.py` wraps the existing installer, preflight and persistent
+cycle runner. Its default action only checks local source identity and prints
+a plan; it starts no Modal App. The default saved image runs experiment code
+at `877a4f4`, while the wrapper is serialized separately and retained with its
+source hashes. Changes to the image's experiment files are rejected before
+launch. The default image ID belongs to the original author's Modal workspace;
+teammates must use `--cpu-receipt` with their own successful preparation JSON
+from `tools/modal_candidate.py` (or `tools/modal_gpu_image.py` with their own
+`--base-image`). Usage is billed to the Modal workspace that launches the run.
+
+```bash
+# In the isolated Modal client environment (modal==1.6.3), from a clean commit:
+# CPU-only: reuse the saved installation, update source and verify logging.
+python tools/modal_gpu_image.py --output .candidate-control/logging-image.json
+python tools/modal_gpu.py --trial validation-20261102-b \
+  --cpu-receipt .candidate-control/logging-image.json
+
+# Paid operation: run only after checking PSC state and approving the budget.
+python tools/modal_gpu.py --trial validation-20261102-b --launch \
+  --cpu-receipt .candidate-control/logging-image.json \
+  --receipt .candidate-control/modal-gpu-20261102/submission-b.json
+```
+
+The request is one container with `H100!:2` (no H200 substitution), 24 physical
+CPU cores, 256 GiB RAM and 512 GiB scratch quota. CPU and memory limits equal
+their requests. The function has a 230-minute execution timeout, with a
+220-minute work deadline to leave time for cleanup, and a separate ten-minute
+startup timeout. The planning envelope is four hours including startup,
+approximately **$44.30 compute** at the November 2, 2026 list rates, plus
+applicable storage/egress. This is an estimate, not a provider-enforced dollar
+cap. Historical development timings suggest 1.75–2.5 hours; this exact image
+and candidate have no measured GPU runtime yet. See Modal's
+[pricing](https://modal.com/pricing), [resource limits](https://modal.com/docs/guide/resources)
+and [GPU selection](https://modal.com/docs/guide/gpu).
+
+Before model work, the wrapper checks the baked CPU receipt and runtime source
+hashes, records the CUDA-to-GPU-UUID mapping and resources, requires at least
+200 GiB free scratch, and runs a real two-rank NCCL all-reduce. It then invokes
+`install_gpu_kernels.sh`, `preflight.sh whale_qwen4b modal-smoke`, and
+`run_cycles.sh whale_qwen4b modal-smoke`. Experiment children clear Modal's
+`PYTHONPATH`/`PYTHONHOME`; the provider parent environment remains intact.
+
+Each trial uses a new `whale-ladder-gpu-<trial>` Volume mounted only at
+`/opt/whale-work/runs`. Model cache stays mounted at `/models`. The wrapper
+redirects WHALE's candidate-run directory and preflight outputs into that
+results Volume, preserving raw accepted/rejected harnesses and configuration.
+`modal-control/` contains the plan, exact wrapper/probe sources, CPU receipt,
+host mapping, phase logs/timings, kernel package inventory and completion or
+failure receipt. The ordinary cycle layout remains
+`cycles/whale_qwen4b-modal-smoke-s42/`.
+
+The App is detached and submits a single invocation; the local receipt records
+its App and FunctionCall IDs. A client disconnect after submission does not
+cancel the detached run. A local error before that receipt is complete is
+ambiguous: inspect live Apps before resubmitting. Automatic input retries are
+disabled. Modal can still replay inputs after preemption, so a committed start
+marker refuses to execute a second experiment in the same results Volume.
+Preemption, OOM or a hard kill may prevent finalization; completed commits and
+Volume background commits remain, but an interrupted write is not guaranteed.
+See [detached Apps](https://modal.com/docs/guide/apps) and
+[preemption](https://modal.com/docs/guide/preemption).
+
+```bash
+modal container list --app-id APP_ID --json
+modal app logs APP_ID --timestamps
+modal volume get whale-ladder-gpu-validation-20261102-a /modal-control/status.json -
+# After execution, retrieve the complete evidence/checkpoints to a fresh path:
+modal volume get whale-ladder-gpu-validation-20261102-a / /path/to/fresh-evidence
+```
+
+Phase boundaries explicitly commit the Volume; active subprocess output goes
+directly to persistent log files. The wrapper's `execution-completed.json`
+means the existing commands returned success, **not** that the raw audit is
+complete. Verify 2,048 training rollouts per cycle, positive accepted samples
+and optimizer updates, three consumed candidate slots per cycle, correct
+checkpoint/dataloader/harness handoffs, stable search-server PIDs, agreeing and
+changing full solver checksums, a fixed proposer checksum, and 2,048 final test
+rollouts. An incomplete invariant keeps GPU validation incomplete. No paid GPU
+validation has been performed by the launcher preparation work.
+
+Local wrapper checks (no provider calls or GPUs):
+`python -m unittest discover -s tests -p test_modal_gpu.py`.
+
+### Live logging and measurement meanings
+
+The `modal-smoke` profile enables the existing opt-in rollout completion
+instrumentation. It counts completed, exceptional and cancelled attempts in
+training, quick post-update validation, harness evaluation and the final test.
+A completed attempt may be an incorrect answer. Accepted RSFT samples and
+optimizer updates are separate batch-end metrics. Async gather and candidate
+result ordering are preserved; there are no extra model requests, retries or
+candidate opportunities. The installer saves original sources and records the
+before/after/helper hashes.
+
+```bash
+python tools/modal_gpu_status.py \
+  --receipt .candidate-control/modal-gpu-20261102/submission-b.json
+# The same observation as machine-readable JSON:
+python tools/modal_gpu_status.py \
+  --receipt .candidate-control/modal-gpu-20261102/submission-b.json --json
+```
+
+The observer runs in the existing container, writes a heartbeat every ten
+seconds, and preserves `modal-control/live.json` plus `telemetry.jsonl`.
+Snapshots include worker counts/update ages, CPU/RAM and GPU utilization/HBM,
+and available vLLM metrics: generated tokens, token rate, HTTP model responses,
+running/waiting requests, KV-cache usage and preemptions. HTTP responses are not
+completed puzzle rollouts. Missing worker snapshots or missing metrics mean
+unavailable observations, not zero work. A readiness check verifies logging
+before model startup; observation errors are recorded explicitly. No observer
+action restarts work or changes experiment decisions.
+The PSC validation wrapper marks completion only after all phases return
+normally; termination signals and phase failures write a failed status with a
+return code. A hard kill can prevent finalization, so check Slurm state and
+the phase/pass receipts alongside the last heartbeat. The interrupted November
+2 runtime incorrectly wrote `completed` on timeout; this branch fixes that
+finalization path, but does not rewrite the original trial's evidence.
+If the storage API returns a partially published live snapshot, the status
+reader falls back to the last complete telemetry-history row and shows its
+actual age. It never treats an unreadable snapshot as zero completed attempts.
+
+Worker snapshots live in each training/evaluation phase's `rollout-progress/`;
+completed batch snapshots are retained in `finished/`. Search snapshots are
+under each harness evaluation's output directory. Counters are throttled to
+five-second or 64-completion boundaries, so they are recent lower bounds while
+a batch is running. The final count must be checked against raw rollout files.
+
+`phase-timing.jsonl` and `current-phase.json` record sequential controller
+boundaries for training, parking, checkpoint merging, search preparation,
+server startup/refresh, search and final evaluation. `timing-report.json` and
+`results.json` collect those totals alongside existing trainer timers,
+proposer-session costs/tokens/durations and search events. Nested timers may
+overlap; they must not be added to controller wall time. Candidate attempt
+execution includes model calls, harness work and reward checking; the new
+search `evaluation-timing.json` separates that from aggregation/file writing.
+It does not claim to isolate GPU generation from reward checking. Full raw
+parameter-checksum responses are retained in `weight-checksums.jsonl`.
+
+The logging image is derived from the verified CPU image using an exact Git
+bundle from the local commit. It reuses the installed environment, checks
+constraints/data/models and the logging entrypoint on CPUs, and
+preserves the parent CPU receipt. Its source revision and image ID are recorded
+separately from the parent `877a4f4` installation. The existing kernel installer
+performs device detection and remains in the GPU phase, followed by the real
+actor probe. The original image alone does not
+contain these later logging changes.
+
+Modal's filesystem can report virtual free capacity (the first trial reported
+approximately 8 EiB). The host receipt flags such a value; it is not a physical
+disk-capacity measurement. The function requests a 512 GiB scratch quota. Keep
+that provider resource request and the raw filesystem result separate in any
+resource audit.
+
+The first Modal attempt was stopped by user request before a completed training
+batch was saved, to add this logging. Its preflight passed; this does not count
+as completion of either training cycle. Partial generated-attempt counts were
+not observable, so a restart is a distinct validation attempt. The results
+Volume and local raw evidence remain preserved.
+
 ## Running an arm: one command
 
 `ladder/run_cycles.sh ARM PROFILE` runs one arm end to end on the two-GPU
@@ -88,12 +431,28 @@ rung uses the same prompt, the same rules for invalid proposals (logged as
 |---|---|---|---|
 | `mock` | any Linux CPU (cerlab23, PSC) | fakes | does the orchestration work? minutes |
 | `mini4090` | cerlab23, 1 RTX 4090 | Qwen3.5-0.8B | do the real libraries work? about an hour |
+| `persistent-smoke` | PSC, 2 H100s | Qwen3.5-4B | two real-size cycles with persistent search servers; per-arm GPU validation required |
 | `h100` | PSC, 2 H100s | Qwen3.5-4B | the real runs |
+
+The `h100` profile requests two H100s for every arm. Both GPUs generate training
+rollouts and then participate in the weight update. During search, each GPU
+serves one solver replica. Local proposers (4B, 27B and self) take turns with
+the second solver on GPU 1 through sleep/wake; API proposers need no local
+proposer server. The 27B proposer uses one GPU in this layout; its memory fit
+and the complete cycle for each arm still require GPU validation. `rsft_only`
+uses the same training budget with no harness search.
+
+All arms use the same cycle controller for training, checkpoint/harness
+handoffs, resume checks and final evaluation. Persistence controls server
+lifetime within that controller. Use the same schedule, dataset and lifecycle
+policy for comparative proposer runs, after short GPU validation for each
+configuration. The training-only baseline naturally omits harness search.
 
 ## Know it works before a real job: the testing ladder
 
 Each layer catches what the cheaper ones cannot; move up only when the layer
-below passes. Nothing here runs on a laptop (the mock scripts refuse macOS).
+below passes. Real model checks run on GPU nodes; Linux CPU mocks can also run
+in Docker on a laptop, as shown above.
 
 | Layer | Command | Where | Catches | Time |
 |---|---|---|---|---|
@@ -101,7 +460,7 @@ below passes. Nothing here runs on a laptop (the mock scripts refuse macOS).
 | 2. Proposer format check | `bash ladder/proposer_format_check.sh ARM mini4090 B1_RUN_DIR` | cerlab23 4090 (DeepSeek via API) | can each proposer write valid candidates | minutes |
 | 3. Replay B1's search | `bash ladder/search_two_gpu.sh OUT B1_CHECKPOINT 1` with `PROFILE=mini4090` | cerlab23 4090 | real model serving, scoring, the search loop | about 20 min |
 | 4. Mini full loop | `bash ladder/run_cycles.sh ARM mini4090` | cerlab23 4090 | real training, checkpoint hand-off, several cycles | about an hour |
-| 5. Tiny 4B confirmation | `ladder/run_cycles.sh ARM h100` with `CYCLES=1 STEPS_PER_CYCLE=1 SEARCH_ITERS=1` | PSC, 2 H100s, interactive | H100 kernels, full-size memory, the 27B proposer | 1 hour |
+| 5. Per-arm persistent confirmation | `bash ladder/run_cycles.sh ARM persistent-smoke` | PSC, 2 H100s | H100 kernels, real batch sizes, checkpoint reload and server persistence; GPU result pending | measured by this validation |
 | 6. Real runs | `ladder/run_cycles.sh ARM h100` in `sbatch` | PSC | the results | days |
 
 **Layer 1 setup (once, CPU only):**
@@ -128,7 +487,15 @@ INSTALL_PROFILE=mini4090 SKIP_27B=1 bash setup/install.sh   # installs Miniforge
 B1's saved search directory and resume checkpoint come from Sumanth's Hugging
 Face upload (the checkpoint must contain `actor/` and `data.pt`).
 
-## How one cycle runs on 4 H100s
+## Earlier four-GPU execution path
+
+The diagram and operational sections through "Where things are written"
+describe the earlier four-GPU scripts (`run_arm.sh`, `interactive_test.sh`,
+`slurm/smoke.sbatch`). They use different profiles, output paths and completion
+checks. `tiny` and `smoke` still require four GPUs: do not reduce those scripts'
+GPU requests to two. They are not launchers for the two-GPU `h100` profile.
+Use `run_cycles.sh ARM h100` for the current two-GPU path, or the explicit
+persistent validation command above for the intended arm.
 
 ```text
 weight phase   GPU 0-1  verl FSDP trainer (full fine-tune, online RSFT)
@@ -142,7 +509,7 @@ harness phase  pre-hook: merge checkpoint to HF format, serve it as the solver,
                post-hook: stop all servers, free the GPUs
 ```
 
-GPU split in the harness phase: `deepseek` solver on 4 GPUs; `qwen27b` solver
+Legacy four-GPU harness split: `deepseek` solver on 4 GPUs; `qwen27b` solver
 on 2, proposer on 2; `qwen4b` and `self` solver on 3, proposer on 1.
 
 ## Before you start
@@ -304,7 +671,15 @@ FlashAttention is absent. Padding fallback does not supply attention kernels.
 
 The NCCL weight-transfer path needs CuPy matching PyTorch's CUDA runtime. Its
 installer constrains installed packages while adding the missing dependency.
-The kernel installer obtains matching precompiled kernels through vLLM's helper.
+The kernel installer obtains matching precompiled kernels through vLLM's helper
+and installs `causal-conv1d==1.7.0` from `setup/constraints/gpu-kernels.txt` with
+build isolation and dependency replacement disabled. This is a new GPU-stage
+requirement, separate from the captured November 2 CPU package inventory.
+Its [upstream release](https://github.com/Dao-AILab/causal-conv1d/tree/v1.7.0)
+supports CUDA 13 builds; compatibility with this project's exact stack remains
+pending until GPU preflight passes. The installer and preflight both require
+the compiled extension and check FP32/BF16 forward/backward against PyTorch.
+An import alone does not establish execution compatibility or a speedup.
 `ladder/config.env` selects Conda's C++ runtime and optionally loads the PSC GCC
 module specified by `LADDER_GCC_MODULE`; persist that setting in your job environment
 or site configuration so subsequent launches use the same compiler.
@@ -329,10 +704,11 @@ Dependency-free regression tests: `python3 -m unittest discover -s tests -v`.
 
 ### Runtime diagnostics
 
-- **Trainer out of memory:** the profiles in this branch allocate four GPUs.
-  Two-GPU full fine-tuning needs a separately validated memory configuration;
-  the legacy `FSDP_OPTIM_OFFLOAD` flag alone did not prevent Adam initialization
-  from exhausting GPU memory in development trials.
+- **Trainer out of memory:** `h100` and `persistent-smoke` use the shared
+  two-GPU training configuration with native CPU optimizer offload; the legacy
+  `tiny`/`smoke` profiles use four GPUs. Check that the launcher matches the
+  profile. The legacy `FSDP_OPTIM_OFFLOAD` flag alone did not prevent Adam
+  initialization from exhausting GPU memory in development trials.
 - **Ray hangs at startup:** too few CPUs for the agent workers. Lower `AGENT_NUM_WORKERS` in the profile.
 - **Proposer check fails on tool calls:** check the vLLM tool-call / reasoning parser names for the model and set `TOOL_CALL_PARSER` / `REASONING_PARSER` in `config.env`.
 - **Proposer check fails with a context error (small models):** lower `PROPOSER_MAX_MODEL_LEN` only if the model cannot serve it. Claude Code's system prompt plus the skill file is long, and a 4B failing here is itself a result: it is logged separately from bad edits.
@@ -382,11 +758,13 @@ The small eager/graph comparison used 128 rollouts and a single rollout GPU;
 its speedup should not be extrapolated as a universal multiplier. The 75%
 memory setting worked, but a matched 60% control was not completed.
 
-This is a review extraction from development runs. It removes optional live
-progress instrumentation and persistent-server integration, and makes the
+This was a review extraction from development runs. It removed optional live
+progress instrumentation and persistent-server integration, and made the
 measured eight-worker/75% configuration the opt-in runner's defaults. Its exact
 extracted revision still needs a GPU generation/update validation before
 merging. It is not a complete harness-search or full research schedule.
+The later candidate's Modal profile restores completion counters as documented
+above; the historical extracted revision did not include them.
 
 ## Two-GPU candidate scoring and sleep/wake switching (opt-in)
 
@@ -403,8 +781,8 @@ sleeping that solver, propagates HTTP failures without retrying, and records
 request counters separately from WHALE's completed-puzzle counts.
 
 The search runner scores the incoming baseline, proposes three harnesses per
-iteration, and evaluates each on 256 puzzles with one attempt per puzzle. The
-next iteration receives evaluation feedback. It defaults to one iteration and
+iteration, and evaluates each usable candidate on 256 puzzles with one attempt
+per puzzle. The next iteration receives evaluation feedback. It defaults to one iteration and
 accepts 1–6; the historical switching validation completed two real iterations.
 All servers use CUDA graphs and 75% inference memory. Proposing and scoring
 are sequential; an overlap benchmark showed no improvement.
@@ -424,9 +802,12 @@ SWITCH_MODE=benchmark SWITCH_REFERENCE_RUN=/path/to/previous/harness-run \
 The checkpoint merger publishes `hf/` only after successful conversion and
 validation, and marks it `.merge_complete`. An older unmarked merge is preserved
 before replacement. The runner writes server logs, `timing.jsonl`, router/GPU
-metrics, and `harness-run-dir`; `passed.json` requires all expected candidates
-to have 256-puzzle scores with the original 8,129-token assistant budget. Failure
-stops the run and preserves the evidence. Cleanup signals only subprocess groups
+metrics, and `harness-run-dir`; `passed.json` requires every requested slot to
+be recorded as evaluated or rejected. Evaluated candidates must have 256-puzzle
+scores with the original 8,129-token assistant budget. Invalid or missing
+candidates consume their slots; an entirely invalid iteration retains the
+incumbent. Scoring or infrastructure failure stops the run and preserves the
+evidence. Cleanup signals only subprocess groups
 started by this invocation; it does not submit or cancel an allocation.
 
 `benchmarks/two-gpu-search.json` records the historical comparison: the same
@@ -434,11 +815,15 @@ three-candidate round, including switching, took 559.71 seconds with server
 restarts and 393.70 seconds with sleep/wake. Each switch fell from approximately
 64–72 seconds to less than one second. These measurements exclude initial model
 startup and proposing, and do not establish a matched one-GPU/two-GPU speedup.
+Both cycle lifecycle modes already use this within-search sleep/wake behavior.
+The incremental cross-cycle benefit is not yet measured: the November 2 trial
+spent 314.38 seconds starting and checking three servers, but timed out before
+completing the next checkpoint refresh. Persistence aims to replace repeated
+startup with park/reload/checksum work; a complete matched run is needed to
+measure net savings.
 
-This extracted branch still requires GPU validation before merging. It changes
-the baseline evaluation to use both GPUs and selects serialized switching for
-new searches; those exact extracted defaults have not been rerun on H100s.
-It does not fix proposer-generated invalid Python or missing harness functions,
-and it does not introduce automatic candidate repair. Keeping servers resident
-across weight updates, checkpoint hot reload, and the full alternating trial
-controller remain separate experimental work.
+The historical timings above do not validate this combined candidate on H100s.
+PR4 records invalid Python and missing harness functions as rejected proposals;
+it does not repair them. Cross-cycle server persistence and checkpoint reload
+are available through the separate `persistent-smoke` profile described above.
+GPU validation of the combined candidate remains pending.

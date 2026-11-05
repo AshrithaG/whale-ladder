@@ -64,7 +64,7 @@ for arm in ARMS:
         best = max([s["incoming_harness_score"] or 0.0] + scores)
         acc = s["accepted"]
         acc_score = s["incoming_harness_score"] if acc == "h0" else next(
-            (x["score"] for x in s["candidates"] if x["harness"] == acc), None)
+            (x["score"] for x in s["candidates"] if x["harness"] == acc and x["status"] == "evaluated"), None)
         if acc_score is None or acc_score < best - 1e-9:
             sel_ok = False
     check(f"{arm}: accepted harness is the best scored one every cycle", sel_ok)

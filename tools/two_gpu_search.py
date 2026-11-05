@@ -120,6 +120,7 @@ class Experiment:
         self.launch_counts[name] = self.launch_counts.get(name, 0) + 1
         logfile = self.out / f'{name}-{self.launch_counts[name]}.log'
         started = time.monotonic()
+        self.event('server_start_begin', name=name, logfile=str(logfile))
         with logfile.open('w') as log:
             self.processes[name] = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
                                                    start_new_session=True)
@@ -205,6 +206,7 @@ class Experiment:
             self.sleep('solver1')
             self.wake('proposer')
         self.check_model('proposer')
+        self.phase = 'proposing'
         self.event('transition_to_proposing', mode=mode, seconds=time.monotonic()-started)
 
     def monitor(self):
@@ -245,6 +247,7 @@ class Experiment:
         try:
             for name, path in harnesses:
                 stage = time.monotonic()
+                self.event('candidate_score_begin', harness=name)
                 measured = sweep(copy.deepcopy(config), [(name, path)], logs, force=True)
                 self.event('candidate_score', harness=name, seconds=time.monotonic()-stage, results=measured)
                 if any(not ok for _, ok in measured):
@@ -373,13 +376,18 @@ class Experiment:
         summary = run_dir/'logs/evolution_summary.jsonl'
         rows = [json.loads(x) for x in summary.read_text().splitlines()] if summary.exists() else []
         names = {r['harness'] for r in rows if r.get('status')=='evaluated'}
-        expected = {f'h{i}' for i in range(1, self.proposals*iterations+1)}
-        assert names <= expected, (names, expected)
+        # WHALE checks membership in each iteration's assigned slots. Its IDs
+        # follow existing folders, so a rejected stray folder can leave gaps.
         self.validate_scores(run_dir/'logs', names)
         # Invalid proposals are skipped and recorded by WHALE's patched loop
         # (patches/candidate-validation.patch); nothing is repaired or retried.
         invalid = [r for r in rows if str(r.get('status', '')).startswith('rejected')]
-        outcome = dict(candidates_evaluated=len(names), candidates_rejected=len(invalid),
+        rejected_slots = {(r['iteration'], r['harness']) for r in invalid if r.get('requested_slot', True)}
+        evaluated_slots = {(r['iteration'], r['harness']) for r in rows if r.get('status') == 'evaluated'}
+        if len(evaluated_slots) + len(rejected_slots) != self.proposals * iterations:
+            raise RuntimeError('Candidate slot accounting incomplete: inspect evolution_summary.jsonl')
+        outcome = dict(candidates_evaluated=len(evaluated_slots), candidates_rejected=len(rejected_slots),
+                       candidates_missing=sum(r.get('status') == 'rejected_missing' for r in invalid),
                        rejected_reasons=[r.get('reason', '') for r in invalid],
                        accepted_harness=(run_dir/'logs/accepted_harness.txt').read_text().strip())
         self.event('search_outcome', **outcome)

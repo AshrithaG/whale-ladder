@@ -28,7 +28,8 @@ export PYTHONPATH="$DOMAIN_DIR"
 
 # Count the job's own GPUs (CUDA_VISIBLE_DEVICES under Slurm), not every GPU
 # nvidia-smi can see on a shared node.
-check "job has 4 GPUs" bash -c 'n=$(if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then tr "," "\n" <<< "$CUDA_VISIBLE_DEVICES" | wc -l; else nvidia-smi -L | wc -l; fi); [[ $n -ge 4 ]] && echo "$n GPUs (${CUDA_VISIBLE_DEVICES:-all}), $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"'
+expected_gpus="${HYBRID_NUM_GPUS:-4}"
+check "job has $expected_gpus GPUs" bash -c 'n=$(if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then tr "," "\n" <<< "$CUDA_VISIBLE_DEVICES" | wc -l; else nvidia-smi -L | wc -l; fi); [[ $n -eq "$1" ]] && echo "$n GPUs (${CUDA_VISIBLE_DEVICES:-all})"' gpu-count "$expected_gpus"
 check "WHALE patch applied" grep -q PRE_HARNESS_HOOK "$WHALE_DIR/run/lib/alternate.sh"
 check "torch sees CUDA" python -c 'import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.device_count())'
 check "declared package dependencies" python -m pip check
@@ -40,6 +41,7 @@ check "verl trainer imports" python -c 'import verl.trainer.main_textarena_disag
 check "chess agent-loop imports" python -c 'import verl.experimental.agent_loop.chess_puzzle_agent_loop'
 check "disaggregated FSDP worker imports" python -c 'import verl.workers.disagg_fsdp_workers'
 check "training padding forward/backward" python "$LADDER_HOME/setup/check_padding_backend.py"
+check "compiled causal-conv1d forward/backward" python "$LADDER_HOME/setup/check_causal_conv1d.py"
 check "vLLM rollout integration imports" python -c 'import verl.workers.rollout.vllm_rollout.vllm_async_server'
 check "streamed tied-weight validation" python "$LADDER_HOME/setup/check_streamed_weights.py"
 check "NCCL checkpoint backend available" python "$LADDER_HOME/setup/check_checkpoint_backend.py"
@@ -62,6 +64,13 @@ check "chess data fingerprint" data_fp
 check "solver weights @ ${SOLVER_MODEL_REVISION:0:7}" python -c "from huggingface_hub import snapshot_download as s; print(s('$SOLVER_MODEL', revision='$SOLVER_MODEL_REVISION', local_files_only=True))"
 check "weight-transfer buffer fits model tensors" python "$LADDER_HOME/setup/check_transfer_buffer.py" \
   "$HF_HOME/hub/models--${SOLVER_MODEL//\//--}/snapshots/$SOLVER_MODEL_REVISION" "${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-3072}"
+if [[ "${LADDER_PERSISTENT_SEARCH:-0}" == 1 ]]; then
+  # Compile the real 4B actor path and exercise CPU-offloaded backward/update
+  # before spending time generating the full training batch. This model is
+  # temporary and is never saved or used by the research run.
+  check "real actor forward/backward and native CPU optimizer" python "$LADDER_HOME/setup/check_training_forward.py" \
+    "$HF_HOME/hub/models--${SOLVER_MODEL//\//--}/snapshots/$SOLVER_MODEL_REVISION" --native-offload
+fi
 # Use the real launcher's overrides and entrypoint, without creating workers.
 # Keep its generated logs separate from training logs.
 training_config() (
@@ -70,7 +79,14 @@ training_config() (
   export RUN_NAME="$RUN_NAME-preflight" OUTPUT_ROOT="$LADDER_ROOT/preflight"
   log="$LADDER_ROOT/preflight/$RUN_NAME.log"
   mkdir -p "$(dirname "$log")"
-  if timeout 180 bash "$TRAIN_SCRIPT" --cfg job > "$log" 2>&1; then
+  if [[ -n "${HYBRID_NUM_GPUS:-}" ]]; then
+    timeout 180 bash "$LADDER_HOME/ladder/hybrid_test.sh" "$LADDER_ROOT/preflight/$RUN_NAME" --dry-run > "$log" 2>&1
+    status=$?
+  else
+    timeout 180 bash "$TRAIN_SCRIPT" --cfg job > "$log" 2>&1
+    status=$?
+  fi
+  if (( status == 0 )); then
     echo "composed actual launcher configuration: $log"
   else
     tail -60 "$log"; return 1

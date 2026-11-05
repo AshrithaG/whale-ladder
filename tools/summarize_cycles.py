@@ -38,6 +38,31 @@ def val_score(metrics: dict) -> dict[str, float]:
     return {k: v for k, v in metrics.items() if k.startswith("val-core/") and isinstance(v, (int, float))}
 
 
+def timing_report(state):
+    phases = jsonl(state / 'phase-timing.jsonl')
+    details = {}
+    for directory in sorted(state.glob('c*-train')) + [state / 'final-test']:
+        steps = {}
+        for row in jsonl(directory / 'training-metrics.jsonl'):
+            steps.setdefault(str(row['step']), {}).update({k: v for k, v in row.get('data', {}).items()
+                if k.startswith('timing_s/') or k in ('actor/sft_time', 'actor/sft_updates',
+                    'online_rsft/total', 'online_rsft/accepted')})
+        if steps:
+            details[directory.name] = steps
+    search = {}
+    for directory in sorted(state.glob('*-search')):
+        search[directory.name] = dict(events=jsonl(directory / 'timing.jsonl'),
+                                      proposer_sessions=jsonl(directory / 'proposer_cost.jsonl'))
+    starts = [r['started_unix'] for r in phases]
+    ends = [r['ended_unix'] for r in phases]
+    wall = max(ends) - min(starts) if phases else None
+    measured = sum(r['elapsed_seconds'] for r in phases)
+    return dict(controller_wall_seconds=wall, sequential_phase_seconds=measured,
+        controller_gap_seconds=max(0, wall - measured) if wall is not None else None,
+        phases=phases, trainer_details=details, search_details=search,
+        note='Sequential controller phases can be summed. Trainer and search details are nested and may overlap; do not add them to phase totals. Candidate attempt execution includes model calls and reward checking.')
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("state", type=Path)
@@ -102,7 +127,10 @@ def main() -> None:
         if last and sha(state / "final-harness.py") != last:
             problems.append("final test used a different harness than the last cycle accepted")
 
-    result = {"arm": a.arm, "profile": a.profile, "cycles": cycles, "final_test": test, "problems": problems}
+    timings = timing_report(state)
+    (state / 'timing-report.json').write_text(json.dumps(timings, indent=2) + '\n')
+    result = {"arm": a.arm, "profile": a.profile, "cycles": cycles, "final_test": test, "problems": problems,
+              'timings': timings}
     (state / "results.json").write_text(json.dumps(result, indent=2) + "\n")
 
     print(f"\n{a.arm} / {a.profile}")
@@ -120,6 +148,10 @@ def main() -> None:
     print(f"  final test: {test['scores'] if test else 'missing'}")
     for p in problems:
         print(f"  PROBLEM: {p}")
+    if timings['phases']:
+        print('  Controller phase timings (seconds):')
+        for phase in timings['phases']:
+            print(f"    {phase['phase']}: {phase['elapsed_seconds']:.1f} ({phase['status']})")
 
 
 if __name__ == "__main__":

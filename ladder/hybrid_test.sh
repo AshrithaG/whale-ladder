@@ -26,6 +26,9 @@ fi
 target_step=$((start_step+training_steps))
 case "$mode" in train|eval) ;; *) echo 'HYBRID_MODE must be train or eval' >&2; exit 2 ;; esac
 num_gpus="${HYBRID_NUM_GPUS:-2}"
+# Training uses the baseline environment below. Retain the search backend only
+# for checking resident-server receipts; it does not configure the trainer.
+persistent_search_backend="${PROPOSER_BACKEND:-local}"
 # Training is the same for every arm, so its environment is always rsft_only's.
 export ARM=rsft_only PROFILE="${PROFILE:-smoke}" LADDER_NUM_GPUS="$num_gpus"
 export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
@@ -37,7 +40,7 @@ export RUN_NAME="${HYBRID_RUN_NAME:-hybrid-check-j$job_tag}"
 [[ "$RUN_NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid hybrid run name' >&2; exit 2; }
 export RUN_OUT="$test_dir" OUTPUT_ROOT="$test_dir/checkpoints"
 export PROJECT_DIR="$DOMAIN_DIR"
-export RAY_TMPDIR="/tmp/ray-${USER}-${job_tag}-hy"
+export RAY_TMPDIR="/tmp/ray-${USER:-u}-${job_tag}-hy"
 export N_GPUS_PER_NODE="$num_gpus" NNODES=1 ROLLOUT_GPUS_PER_NODE="$num_gpus" ROLLOUT_NNODES=1
 export TRAIN_BATCH_SIZE="${HYBRID_TRAIN_BATCH:-256}" ROLLOUT_N="${HYBRID_ROLLOUT_N:-8}" VAL_ROLLOUT_N="${HYBRID_VAL_ROLLOUT_N:-2}"
 export PPO_MINI_BATCH_SIZE="$TRAIN_BATCH_SIZE"
@@ -68,6 +71,9 @@ if [[ -f "$VERL_FILE_LOGGER_PATH" && "$dry_run" != --dry-run ]]; then
   echo 'Use a fresh output directory for another hybrid attempt.' >&2
   exit 2
 fi
+if [[ "${LADDER_ROLLOUT_PROGRESS:-0}" == 1 ]]; then
+  python "$LADDER_HOME/setup/install_rollout_progress.py" "$DOMAIN_DIR" "$test_dir/source-backups"
+fi
 python "$LADDER_HOME/setup/prepare_hybrid_launcher.py" "$DOMAIN_DIR" "$test_dir/launcher"
 export LADDER_HYBRID_PREAMBLE="$test_dir/launcher/preamble_hybrid.py"
 launcher="${LADDER_TRAIN_LAUNCHER:-$test_dir/launcher/train_hybrid.sh}"
@@ -88,6 +94,9 @@ args=(trainer.resume_mode=disable "trainer.total_training_steps=$target_step"
       actor_rollout_ref.rollout.data_parallel_size=1
       actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
       '~trainer.disaggregated_rsft')
+if [[ "${LADDER_ROLLOUT_PROGRESS:-0}" == 1 ]]; then
+  args+=("+trainer.rollout_progress_dir=$test_dir/rollout-progress")
+fi
 if [[ "$mode" == train && -n "${HYBRID_RESUME_CHECKPOINT:-}" ]]; then
   args+=(trainer.resume_mode=resume_path "trainer.resume_from_path=$HYBRID_RESUME_CHECKPOINT")
 fi
@@ -101,10 +110,18 @@ if [[ "$dry_run" == --dry-run ]]; then
   exit 0
 fi
 cleanup() {
+  if [[ "${LADDER_ROLLOUT_PROGRESS:-0}" == 1 ]]; then
+    python "$LADDER_HOME/setup/ladder_rollout_progress.py" "$test_dir/rollout-progress" "$test_dir/rollout-progress-final.json" || true
+  fi
   stop_job_ray
 }
 trap cleanup EXIT
-wait_gpus_free 120
+if [[ -n "${HYBRID_PERSISTENT_SLEEP_RECEIPT:-}" ]]; then
+  PROPOSER_BACKEND="$persistent_search_backend" python "$LADDER_HOME/tools/persistent_search.py" \
+    --check-sleep-receipt "$HYBRID_PERSISTENT_SLEEP_RECEIPT"
+else
+  wait_gpus_free 120
+fi
 echo "HYBRID CHECK START: mode=$mode; $num_gpus GPU(s); memory=$GPU_MEM_UTIL; backend=${HYBRID_GDN_PREFILL_BACKEND:-triton}; $((TRAIN_BATCH_SIZE * ROLLOUT_N)) rollouts per full batch"
 timeout --signal=TERM --kill-after=60s "${HYBRID_TIMEOUT_S:-5400}s" bash "$launcher" "${args[@]}" 2>&1 | tee "$test_dir/console.log"
 export HYBRID_VALIDATION_START_STEP="$start_step"

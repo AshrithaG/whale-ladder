@@ -1,0 +1,67 @@
+{
+  "kind": "CPU-only simulated execution; no GPU or real model validation",
+  "checked_at": "2026-11-05T15:19:48.445530-05:00",
+  "base_revision": "0308d742988a93f18997d4c4444f7f9b585f5627",
+  "runtime_worktree_committed": false,
+  "unit_tests": {
+    "passed": true,
+    "count": 68,
+    "platform": "Linux Docker Python 3.11"
+  },
+  "arms": [
+    "rsft_only",
+    "whale_deepseek",
+    "whale_qwen27b",
+    "whale_qwen4b",
+    "whale_self"
+  ],
+  "restart_mode": {
+    "passed": true,
+    "cycles_per_arm": 3,
+    "checks_passed": 56,
+    "injected_training_failure_and_resume": true,
+    "proposer_format_checks": true
+  },
+  "persistent_mode": {
+    "passed": true,
+    "cycles_per_arm": 2,
+    "stable_server_pids": true,
+    "changing_solver_checksums": true,
+    "frozen_proposers_unchanged": true,
+    "self_proposer_matches_updated_solver": true,
+    "api_has_no_local_proposer": true,
+    "candidate_slot_accounting": true,
+    "resume_and_final_evaluation": true
+  },
+  "validation_notes": [
+    "Full restart-mode audit passed on the final controller before the receipt-only hybrid launcher fix. That change affects persistent-mode receipt validation, not restart execution.",
+    "The earlier persistent attempt caught a lost backend after training selected the rsft_only environment. It remains preserved as a failed attempt.",
+    "The complete persistent-mode audit and all 68 unit tests passed after the backend handoff fix.",
+    "Both unit and integration model backends are simulated. No causal-conv1d CUDA execution, GPU memory fit, real checkpoint reload or cross-cycle speedup is established.",
+    "Historical real-GPU measurements remain separate in two-gpu-search.json and psc-validation-20261102.json."
+  ],
+  "raw_logs": "Retained privately in the review worktree .candidate-control directories.",
+  "source_sha256": {
+    "ladder/hybrid_test.sh": "86c991be584de739668d6f085d425a17052c4a4c56d1d860a07d622b525c7bb1",
+    "ladder/interactive_test.sh": "0e3ba98d19e5bb606b5df1f2e2138da8bcd254e59103437ffe03a18fac08e73d",
+    "ladder/mock_persistent.sh": "f9773d7b50bf92246129f76e01b982f90727259aa0051ae9b1aa9695d26e46ec",
+    "ladder/profiles/h100.env": "626f6eae6b8eb23c0fb54ba533d2108188e9c8eec9c2c893336d1fc3507962b4",
+    "ladder/run_cycles.sh": "5f6116fa6260dc64e32c3483d1cfe94e082f91baf6132a2768ec0c7c24961a75",
+    "ladder/validate_candidate.sh": "1f721177dcb5ed2dc0e8144f7a205a74b0cbe3cbb381688b02d57a4e2e6256ed",
+    "setup/check_causal_conv1d.py": "915c4870f6ec58dfce87c185dff4f8f81666269435a004b1ee96ae7e58f839ad",
+    "setup/constraints/gpu-kernels.txt": "a0b454b196e2ee60c20ff18037c426e99bc5491ec77ba90a106b2e6b339d1373",
+    "setup/install_gpu_kernels.sh": "119583e84e4f9a7d6c041b84a7e213dfbf6b3e8a4fdcbb969ee2457e404b6486",
+    "setup/preflight.sh": "a4dc45bac1fe3f6070d46ec84f342c9be093e1804178a27c994072aa9ddd9b65",
+    "slurm/candidate_validate.sbatch": "abb70ba3332b3fc89be9a95b6415731973f1d0b6c5381af7446b893406179f1f",
+    "slurm/smoke.sbatch": "3a82bd726fc8de9b7d67240159ee018f5c626a980cccae2d6a0e6b6289335583",
+    "tests/mock/check_shared_controller.py": "efee4f7c9385b3e493635b7b9cd7cf1064fdb5129df7622d6bb3d5043009128c",
+    "tests/test_allocation_controller.py": "0588adee247d0083e2fea7b6fd49022802ea5a94fea82180de4ed79b3a4c4e14",
+    "tests/test_cycle_controller.py": "a1e817215fcb93cd356ec987ef9b1a105175ae94a50addde09ed6b7ef63599ab",
+    "tests/test_persistent_search.py": "8bff2155874faf65fc76843cfa5af49731c767507e98b9e716abdfc850cba18a",
+    "tests/test_validation_status.py": "97d41065451a7986551ac563a002a96c2c8c09ab387bd214077154b1cb1a31ca",
+    "tools/cycle_controller.py": "483d4f67a1788701acfd73da4bd4ffe08d916112e005c3d870efa0c2d80246c0",
+    "tools/persistent_cycles.py": "4df9039a9dc81a03e1f567d03c9291c5f74113c49799b049b49338a60d9fb184",
+    "tools/persistent_search.py": "5732c9a86bf35dd984433052af559f49de04443924bfcdb4733f7ae597417b68"
+  },
+  "gpu_validated": false
+}
