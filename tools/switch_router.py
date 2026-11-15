@@ -21,6 +21,7 @@ class BackendPool:
         self.completed = [0] * len(urls)
         self.failed = [0] * len(urls)
         self.closed = False
+        self.waiting = 0
 
     def enable(self, indices):
         with self.condition:
@@ -29,14 +30,25 @@ class BackendPool:
 
     def acquire(self):
         with self.condition:
-            while not self.closed:
-                available = [i for i in self.enabled if self.running[i] < self.capacity]
-                if available:
-                    i = min(available, key=lambda j: (self.running[j], self.completed[j], j))
-                    self.running[i] += 1
-                    return i
-                self.condition.wait(1)
-            raise RuntimeError('Router closed')
+            self.waiting += 1
+            self.condition.notify_all()
+            try:
+                while not self.closed:
+                    available = [i for i in self.enabled if self.running[i] < self.capacity]
+                    if available:
+                        i = min(available, key=lambda j: (self.running[j], self.completed[j], j))
+                        self.running[i] += 1
+                        return i
+                    self.condition.wait(1)
+                raise RuntimeError('Router closed')
+            finally:
+                self.waiting -= 1
+                self.condition.notify_all()
+
+    def wait_idle(self, timeout=900):
+        with self.condition:
+            if not self.condition.wait_for(lambda: self.waiting == 0 and not any(self.running), timeout):
+                raise TimeoutError('Solver requests failed to drain after candidate scoring')
 
     def release(self, i, success):
         with self.condition:
@@ -47,12 +59,12 @@ class BackendPool:
     def drain(self, index, timeout=900):
         with self.condition:
             self.enabled.discard(index)
-            if not self.condition.wait_for(lambda: self.running[index] == 0, timeout):
+            if not self.condition.wait_for(lambda: self.waiting == 0 and self.running[index] == 0, timeout):
                 raise TimeoutError(f'Backend {index} failed to drain')
 
     def snapshot(self):
         with self.condition:
-            return dict(enabled=sorted(self.enabled), running=self.running[:],
+            return dict(enabled=sorted(self.enabled), running=self.running[:], waiting=self.waiting,
                         completed=self.completed[:], failed=self.failed[:])
 
 

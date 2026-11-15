@@ -1,0 +1,51 @@
+diff --git a/domains/chess_puzzles/autoharness_chess_puzzle/runner.py b/domains/chess_puzzles/autoharness_chess_puzzle/runner.py
+--- a/domains/chess_puzzles/autoharness_chess_puzzle/runner.py
++++ b/domains/chess_puzzles/autoharness_chess_puzzle/runner.py
+@@ -246,6 +246,8 @@
+                 max_turns=effective_max_turns(harness),
+             )
+         )
++    except MemoryError:
++        raise
+     except Exception:
+         return observation
+ 
+@@ -268,6 +270,8 @@
+     )
+     try:
+         user = user_template.format(observation=observation)
++    except MemoryError:
++        raise
+     except Exception:
+         user = user_template + "\n\n" + observation
+     messages = [ChatMessage(role="system", content=system)]
+@@ -292,6 +296,8 @@
+     if harness.parse_action is not None:
+         try:
+             return normalize_uci(str(harness.parse_action(response)))
++        except MemoryError:
++            raise
+         except Exception:
+             pass
+     text = str(response or "")
+@@ -401,6 +407,8 @@
+     observation = build_observation(state)
+     try:
+         legal_by_harness = bool(harness.is_legal_action(observation, parsed))
++    except MemoryError:
++        raise
+     except Exception as exc:
+         state.event_log.append({"source": "harness_is_legal_action_error", "error": str(exc)})
+     if not legal or not legal_by_harness:
+diff --git a/domains/chess_puzzles/meta_harness/chess_puzzle_benchmark.py b/domains/chess_puzzles/meta_harness/chess_puzzle_benchmark.py
+--- a/domains/chess_puzzles/meta_harness/chess_puzzle_benchmark.py
++++ b/domains/chess_puzzles/meta_harness/chess_puzzle_benchmark.py
+@@ -95,6 +95,8 @@
+                             policy_max_tokens=policy_max_tokens,
+                         )
+                         rows.append((desc, True))
++                    except MemoryError:
++                        raise
+                     except Exception as exc:
+                         out_dir.mkdir(parents=True, exist_ok=True)
+                         (out_dir / "error.txt").write_text(

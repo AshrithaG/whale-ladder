@@ -190,7 +190,7 @@ class PersistentSearch(Experiment):
         self.pool.enable([0] if self.local_proposer else [0, 1])
 
     def search(self, mh, iterations):
-        attrs = ('render_task_prompt', 'run_sweep', 'PROPOSER_SYSTEM_PROMPT', 'PROMPT_ONLY')
+        attrs = ('render_task_prompt', 'run_sweep', 'validate_candidate', 'PROPOSER_SYSTEM_PROMPT', 'PROMPT_ONLY')
         saved = {key: getattr(mh, key) for key in attrs}
         argv = sys.argv[:]
         try:

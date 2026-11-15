@@ -1,7 +1,7 @@
 diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
 --- a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
 +++ b/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py
-@@ -197,6 +197,109 @@
+@@ -197,6 +197,156 @@
              }
          )
      return candidates
@@ -62,6 +62,7 @@ diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/d
 +    valid_candidates: list[dict[str, Any]] = []
 +    invalid_rejects: list[dict[str, Any]] = []
 +    prompt_only_rejects: list[dict[str, Any]] = []
++    seen_names: set[str] = set()
 +    for index, candidate in enumerate(candidates):
 +        if not isinstance(candidate, dict):
 +            invalid_rejects.append(_reject_row(iteration, f"entry{index}", {}, "manifest entry is not an object"))
@@ -80,16 +81,23 @@ diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/d
 +                _reject_row(iteration, str(name), candidate, f"not one of this iteration's slots {next_names}")
 +            )
 +            continue
-+        if name in valid_names:
++        if name in seen_names:
 +            continue
++        seen_names.add(name)
 +        try:
 +            validate_candidate(run_dir, name)
 +        except Exception as exc:
-+            status = "rejected_prompt_only" if PROMPT_ONLY else "rejected_invalid"
++            if getattr(exc, "fatal_worker_setup", False):
++                raise
++            status = getattr(exc, "status", "rejected_prompt_only" if PROMPT_ONLY else "rejected_invalid")
 +            print(f"{_ts()} {status} {name}: {exc}")
-+            (prompt_only_rejects if PROMPT_ONLY else invalid_rejects).append(
-+                _reject_row(iteration, name, candidate, str(exc), status=status)
-+            )
++            row = _reject_row(iteration, name, candidate, str(exc), status=status)
++            outcome = getattr(exc, "outcome", {})
++            if isinstance(outcome, dict):
++                for key in ("evidence", "resource", "resource_policy", "applied_policy", "usage"):
++                    if key in outcome:
++                        row[key] = outcome[key]
++            (prompt_only_rejects if status == "rejected_prompt_only" else invalid_rejects).append(row)
 +            continue
 +        valid_names.append(name)
 +        valid_candidates.append(candidate)
@@ -108,10 +116,49 @@ diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/d
 +    for row in invalid_rejects + prompt_only_rejects:
 +        row["requested_slot"] = row["harness"] in next_names
 +    return valid_names, valid_candidates, invalid_rejects, prompt_only_rejects
++
++
++def scoring_outcomes(
++    run_dir: Path, candidates: list[dict[str, Any]], results: Any, iteration: int
++) -> tuple[list[str], list[dict[str, Any]]]:
++    """Consume named containment outcomes; retain legacy sweep compatibility."""
++    evaluated: list[str] = []
++    rejected: list[dict[str, Any]] = []
++    results = results if isinstance(results, list) else []
++    for candidate in candidates:
++        name = candidate["name"]
++        named = [row for row in results if isinstance(row, dict) and row.get("harness") == name]
++        legacy = [row for row in results if isinstance(row, (tuple, list)) and len(row) == 2
++                  and isinstance(row[0], str) and len(row[0].split("/")) == 3
++                  and row[0].split("/")[1] == name]
++        if len(named) == 1 and named[0].get("status") == "evaluated":
++            evaluated.append(name)
++            continue
++        if not named and legacy and all(row[1] is True for row in legacy):
++            evaluated.append(name)
++            continue
++        outcome = named[0] if len(named) == 1 else {}
++        status = outcome.get("status", "rejected_evaluation")
++        if not isinstance(status, str) or status not in {"rejected_timeout", "rejected_evaluation", "rejected_resource_limit"}:
++            status = "rejected_evaluation"
++        row = _reject_row(iteration, name, candidate,
++                          str(outcome.get("reason", "Missing, malformed, or failed scoring outcome")), status)
++        row["requested_slot"] = True
++        for key in ("evidence", "resource", "resource_policy", "applied_policy", "usage"):
++            if key in outcome:
++                row[key] = outcome[key]
++        rejected.append(row)
++        # Even legacy evaluators may have stale/partial files. These must not
++        # enter the frontier or success-threshold selection.
++        for source in (run_dir / "logs").glob(f"*/{name}"):
++            destination = run_dir / "rejected-score-evidence" / str(time.time_ns()) / source.parent.name / name
++            destination.parent.mkdir(parents=True, exist_ok=True)
++            shutil.move(str(source), destination)
++    return evaluated, rejected
  
  
  def build_harness_list(run_dir: Path, names: list[str]) -> list[tuple[str, Path]]:
-@@ -479,58 +582,27 @@
+@@ -479,58 +629,39 @@
                  use_api_key=args.use_api_key,
              )
              result.show()
@@ -170,6 +217,8 @@ diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/d
              if prompt_only_rejects:
                  append_evolution_summary(run_dir, prompt_only_rejects)
 -            raise RuntimeError("No valid candidates to evaluate.")
+-
+-        run_sweep(config, build_harness_list(run_dir, valid_names), logs_dir, force=args.force)
 +            print(f"{_ts()} no valid candidates in iteration {iteration}; keeping accepted={current}")
 +            (iter_dir / "comparison.json").write_text(json.dumps({
 +                "iteration": iteration, "accepted_harness": current, "candidates": candidates,
@@ -177,11 +226,31 @@ diff --git a/domains/chess_puzzles/meta_harness/meta_harness_chess_puzzle.py b/d
 +                "rejected": invalid_rejects + prompt_only_rejects,
 +            }, indent=2) + "\n")
 +            continue
- 
-         run_sweep(config, build_harness_list(run_dir, valid_names), logs_dir, force=args.force)
++
++        measured = run_sweep(config, build_harness_list(run_dir, valid_names), logs_dir, force=args.force)
++        valid_names, scoring_rejects = scoring_outcomes(run_dir, valid_candidates, measured, iteration)
++        append_evolution_summary(run_dir, scoring_rejects)
++        valid_candidates = [item for item in valid_candidates if item["name"] in valid_names]
++        if not valid_names:
++            append_evolution_summary(run_dir, prompt_only_rejects)
++            (iter_dir / "comparison.json").write_text(json.dumps({
++                "iteration": iteration, "accepted_harness": current, "candidates": candidates,
++                "summary": [], "no_valid_candidates": True,
++                "rejected": invalid_rejects + prompt_only_rejects + scoring_rejects,
++            }, indent=2) + "\n")
++            print(f"{_ts()} all evaluations rejected; keeping accepted={current}")
++            continue
          frontier = print_frontier(logs_dir, config)
 -        rows = candidate_summary_rows(iteration, candidates, logs_dir, frontier)
 +        rows = candidate_summary_rows(iteration, valid_candidates, logs_dir, frontier)
          early_stop = find_early_stop_candidate(rows, valid_names, early_stop_success_rate)
          accepted = early_stop["harness"] if early_stop else pick_accepted(frontier, run_dir)
          set_accepted_harness(run_dir, accepted)
+@@ -543,6 +674,7 @@
+             "candidates": candidates,
+             "summary": rows,
+             "frontier": frontier,
++            "rejected": invalid_rejects + prompt_only_rejects + scoring_rejects,
+             "early_stop": early_stop,
+         }
+         (iter_dir / "comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")

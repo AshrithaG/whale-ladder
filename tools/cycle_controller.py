@@ -18,6 +18,7 @@ import time
 import uuid
 
 from persistent_search import PersistentSearch
+from candidate_containment import validate_candidate
 
 
 def write(path, value):
@@ -299,7 +300,7 @@ def run(arm, profile):
             accepted = (run_dir / 'logs/accepted_harness.txt').read_text().strip()
             if not re.fullmatch(r'h[0-9]+', accepted):
                 raise ValueError('Invalid accepted harness name')
-            mh.validate_candidate(run_dir, accepted)
+            validate_candidate(run_dir, accepted, module=mh.__name__, prompt_only=mh.PROMPT_ONLY)
             selected = state / f'c{cycle}-accepted.py'
             shutil.copyfile(run_dir / 'harnesses' / accepted / 'harness.py', selected)
             harness, previous = selected, checkpoint

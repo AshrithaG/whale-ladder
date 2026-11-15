@@ -207,12 +207,13 @@ class ReloadTests(unittest.TestCase):
 
     def test_search_preserves_pr4_outcomes_and_restores_module_state(self):
         obj = object.__new__(PersistentSearch)
-        mh = SimpleNamespace(render_task_prompt='prompt', run_sweep='sweep',
+        mh = SimpleNamespace(render_task_prompt='prompt', run_sweep='sweep', validate_candidate='validation',
                              PROPOSER_SYSTEM_PROMPT='system', PROMPT_ONLY=True)
         original, argv = vars(mh).copy(), sys.argv[:]
         outcome = dict(candidates_evaluated=0, candidates_rejected=3, accepted_harness='h0')
         def search(*args, **kw):
             mh.run_sweep = 'closure'
+            mh.validate_candidate = 'changed validation'
             mh.PROPOSER_SYSTEM_PROMPT = 'changed'
             sys.argv = ['changed']
             return outcome

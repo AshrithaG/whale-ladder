@@ -16,6 +16,7 @@ LADDER_SHARE_ONE_GPU=1 places every server on the one assigned GPU.
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -27,11 +28,17 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import ladder_prompt
+from candidate_containment import (evidence_dir, quarantine, run_worker,
+                                   timeout_setting, validate_candidate, resource_policy, read_json_bounded, ResourceExceeded)
 from switch_router import BackendPool, start_router
 
 
 class Experiment:
     def __init__(self):
+        timeout_setting('LADDER_CANDIDATE_VALIDATION_TIMEOUT', 30)
+        timeout_setting('LADDER_CANDIDATE_SCORE_TIMEOUT', 600)
+        resource_policy('validate')
+        resource_policy('score')
         self.out = Path(os.environ['SWITCH_OUT'])
         self.out.mkdir(parents=True, exist_ok=True)
         self.processes = {}
@@ -232,9 +239,76 @@ class Experiment:
         for name in names:
             values = list(Path(logs).glob(f'*/{name}/*/val.json'))
             assert len(values) == 1, (name, values)
-            value = json.loads(values[0].read_text())
+            value = read_json_bounded(values[0])
             assert value['num_examples'] == self.limit, (value['num_examples'], self.limit)
             assert value['metadata']['assistant_token_budget'] == 8129
+
+    def contained_score(self, sweep, config, name, path, logs):
+        directory = evidence_dir(logs, name, 'scoring')
+        quarantine(logs, name, directory)
+        staged = directory / 'scores'
+        outcome = run_worker(dict(action='score', module=sweep.__module__, function=sweep.__name__,
+            config=config, name=name, path=str(Path(path).resolve()), logs=str(staged)), directory,
+            timeout_setting('LADDER_CANDIDATE_SCORE_TIMEOUT', 600))
+        if outcome['status'] == 'ok':
+            try:
+                self.verify_candidate_result(config, name, staged, outcome.get('rows'))
+                # Publish only complete, verified candidate directories. Evidence
+                # and partial outputs stay outside logs even on worker death.
+                for source in staged.glob(f'*/{name}'):
+                    target = Path(logs) / source.parent.name / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source.rename(target)
+                outcome['status'] = 'evaluated'
+            except (ValueError, KeyError, TypeError, OSError, OverflowError, RecursionError) as exc:
+                if isinstance(exc, ResourceExceeded):
+                    outcome.update(status='rejected_resource_limit', reason=str(exc), resource=exc.details)
+                else:
+                    outcome.update(status='rejected_evaluation', reason=str(exc))
+                quarantine(logs, name, directory / 'publication-failure')
+        outcome['harness'] = name
+        (directory / 'outcome.json').write_text(json.dumps(outcome, indent=2) + '\n')
+        self.event('candidate_outcome', **outcome)
+        return outcome
+
+    def verify_candidate_result(self, config, name, logs, rows):
+        expected = {}
+        evaluation = config.get('eval', {})
+        if evaluation.get('assistant_token_budget', 8129) != 8129:
+            raise ValueError('Assistant token budget must remain 8129')
+        models = config.get('models') or [evaluation.get('llm') or {'model': 'mock'}]
+        seeds = config.get('seeds', [int(evaluation.get('seed', 42))])
+        for profile, profile_config in config['task_profiles'].items():
+            for model in models:
+                short = str(model.get('model', 'mock')).split('/')[-1].lower()
+                for seed in seeds:
+                    leaf = short if int(seed) == 42 else f'{short}_seed{int(seed)}'
+                    relative = Path(profile) / name / leaf / 'val.json'
+                    expected[str(relative)] = (int(profile_config.get('limit', evaluation.get('limit', 256))),
+                                              f'{profile}/{name}/{short}_seed{int(seed)}')
+        if not expected or not isinstance(rows, list) or len(rows) != len(expected):
+            raise ValueError('Missing or partial sweep outcomes')
+        if any(not isinstance(row, (list, tuple)) or len(row) != 2 or row[1] is not True for row in rows):
+            raise ValueError('Candidate sweep reported failure or malformed outcomes')
+        if sorted(row[0] for row in rows) != sorted(desc for _, desc in expected.values()):
+            raise ValueError('Sweep outcome names differ from requested evaluations')
+        found = {str(p.relative_to(logs)) for p in Path(logs).rglob('val.json')}
+        if found != set(expected):
+            raise ValueError('Missing, partial, or unexpected score files')
+        for relative, (count, _) in expected.items():
+            value = read_json_bounded(Path(logs) / relative)
+            if not isinstance(value, dict):
+                raise ValueError('Score document must be an object')
+            if type(value.get('num_examples')) is not int or value['num_examples'] != count:
+                raise ValueError('Incomplete evaluation count')
+            if value['metadata']['assistant_token_budget'] != 8129:
+                raise ValueError('Assistant token budget changed')
+            for key in ('success_rate', 'mean_turn_count', 'avg_reward'):
+                metric = value[key]
+                if isinstance(metric, bool) or not isinstance(metric, (int, float)) or not math.isfinite(metric):
+                    raise ValueError(f'Invalid {key}')
+            if not 0 <= value['success_rate'] <= 1 or value['mean_turn_count'] < 0:
+                raise ValueError('Invalid score range')
 
     def score(self, sweep, config, harnesses, logs, overlap=False, mode='sleep'):
         self.status(f'{self.phase.split(":")[0]}: candidate scoring ({mode}, overlap={overlap})')
@@ -246,20 +320,25 @@ class Experiment:
         rows = []
         try:
             for name, path in harnesses:
-                stage = time.monotonic()
                 self.event('candidate_score_begin', harness=name)
-                measured = sweep(copy.deepcopy(config), [(name, path)], logs, force=True)
-                self.event('candidate_score', harness=name, seconds=time.monotonic()-stage, results=measured)
-                if any(not ok for _, ok in measured):
-                    raise RuntimeError(f'Candidate evaluation failed: {name}')
-                self.validate_scores(logs, [name])
-                rows.extend(measured)
+                result = self.contained_score(sweep, copy.deepcopy(config), name, path, logs)
+                # Requests already accepted by the parent router survive worker
+                # death. Finish them before giving the next worker its deadline.
+                self.pool.wait_idle()
+                if self.pool.snapshot()['failed'] != before['failed']:
+                    raise RuntimeError('Solver HTTP request failure')
+                rows.append(result)
+                if name == 'h0' and result['status'] != 'evaluated':
+                    raise RuntimeError(f"Baseline h0 failed: {result['status']}: {result.get('reason', '')}")
         finally:
             if transition:
                 transition.result()
         after = self.pool.snapshot()
-        assert after['failed'] == before['failed'], 'Solver HTTP request failure'
-        assert all(after['completed'][i] > before['completed'][i] for i in range(self.replicas)), 'Every solver replica must serve requests'
+        if any(row['status'] == 'evaluated' for row in rows):
+            assert all(after['completed'][i] > before['completed'][i] for i in range(self.replicas)), 'Every solver replica must serve requests'
+        for name, process in self.processes.items():
+            if process.poll() is not None:
+                raise RuntimeError(f'Shared server exited during scoring: {name}')
         self.check_model('solver0')
         self.event('scoring_with_transition', seconds=time.monotonic()-started, mode=mode,
                    overlap=overlap, before=before, after=after)
@@ -310,8 +389,14 @@ class Experiment:
         self.event('inputs', checkpoint=str(self.checkpoint), gpu_memory_utilization=.75,
                    candidates={n:hashlib.sha256(p.read_bytes()).hexdigest() for n,p in candidates},
                    config=self.config)
+        def matched_score(logs, **kwargs):
+            rows = self.score(mh.run_sweep, self.config, candidates, logs, **kwargs)
+            if (len(rows) != len(candidates)
+                    or {row.get('harness') for row in rows} != {name for name, _ in candidates}
+                    or any(row.get('status') != 'evaluated' for row in rows)):
+                raise RuntimeError('Matched benchmark requires every candidate evaluated')
         self.phase = 'matched-restart'
-        self.score(mh.run_sweep, self.config, candidates, self.out/'matched-restart', mode='restart')
+        matched_score(self.out/'matched-restart', mode='restart')
         self.status('switch experiment: initialize sleeping second solver once')
         self.sleep('proposer')
         self.start('solver1')
@@ -320,7 +405,7 @@ class Experiment:
         self.wake('proposer')
         for label, overlap in [('matched-sleep', False), ('matched-sleep-overlap', True)]:
             self.phase = label
-            self.score(mh.run_sweep, self.config, candidates, self.out/label, overlap=overlap)
+            matched_score(self.out/label, overlap=overlap)
             assert self.processes['solver0'].pid == stable_solver_pid
         (self.out/'matched-passed.json').write_text(json.dumps({'passed':True, 'cases':3,
             'candidate_rollouts_per_case':768, 'solver0_pid':stable_solver_pid}, indent=2))
@@ -331,6 +416,17 @@ class Experiment:
         self.status('switch experiment passed; allocation retained')
 
     def real_search(self, mh, iterations=2, baseline_two_gpu=False):
+        attrs = ('render_task_prompt', 'run_sweep', 'validate_candidate', 'PROPOSER_SYSTEM_PROMPT', 'PROMPT_ONLY')
+        saved = {key: getattr(mh, key) for key in attrs}
+        argv = sys.argv[:]
+        try:
+            return self._real_search(mh, iterations=iterations, baseline_two_gpu=baseline_two_gpu)
+        finally:
+            for key, value in saved.items():
+                setattr(mh, key, value)
+            sys.argv = argv
+
+    def _real_search(self, mh, iterations=2, baseline_two_gpu=False):
         self.status(f'real-search: {iterations} feedback-driven iterations')
         proxy_config = self.out/'litellm.json'
         proxy_config.write_bytes(subprocess.check_output([sys.executable,
@@ -356,6 +452,9 @@ class Experiment:
         run_dir = mh.get_run_dir(run_name).resolve()
         (self.out/'harness-run-dir').write_text(str(run_dir)+'\n')
         sweep = mh.run_sweep
+        def bounded_validation(run_dir, name):
+            return validate_candidate(run_dir, name, module=mh.__name__, prompt_only=mh.PROMPT_ONLY)
+        mh.validate_candidate = bounded_validation
         ladder_prompt.install(mh, run_dir)
         mh.PROMPT_ONLY = False
         def wrapped(config, harnesses, logs_dir, *, force=False):
@@ -365,9 +464,9 @@ class Experiment:
                     config['models'][0]['batch_concurrency'] = 256
                     return self.score(sweep,config,harnesses,logs_dir,overlap=False)
                 config['models'][0]['batch_concurrency'] = 128
-                results = sweep(config,harnesses,logs_dir,force=force)
-                assert all(ok for _,ok in results), results
-                self.validate_scores(logs_dir,['h0'])
+                results = [self.contained_score(sweep, config, name, path, logs_dir) for name, path in harnesses]
+                if any(row['status'] != 'evaluated' for row in results):
+                    raise RuntimeError(f'Baseline h0 failed: {results}')
                 return results
             config['models'][0]['batch_concurrency'] = 256
             return self.score(sweep,config,harnesses,logs_dir,overlap=False)
