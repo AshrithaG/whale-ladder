@@ -806,9 +806,76 @@ metrics, and `harness-run-dir`; `passed.json` requires every requested slot to
 be recorded as evaluated or rejected. Evaluated candidates must have 256-puzzle
 scores with the original 8,129-token assistant budget. Invalid or missing
 candidates consume their slots; an entirely invalid iteration retains the
-incumbent. Scoring or infrastructure failure stops the run and preserves the
-evidence. Cleanup signals only subprocess groups
+incumbent. Generated-module validation and candidate evaluation run in fresh
+Python interpreters with private process groups, while the router and vLLM
+servers remain owned by the parent. `LADDER_CANDIDATE_VALIDATION_TIMEOUT`
+defaults to 30 seconds and `LADDER_CANDIDATE_SCORE_TIMEOUT` to 600 seconds per
+candidate; both must be positive, finite numbers. A deadline produces
+`rejected_timeout`; worker crashes, malformed results, and incomplete scores
+produce `rejected_evaluation`. These candidates consume their requested slots
+and cannot enter the frontier, summary scores, or success-threshold selection.
+If all candidates fail, search retains the incumbent. Baseline h0 failure and
+genuine server/HTTP infrastructure failures still stop the phase clearly.
+
+Resource policy is applied separately to each fresh worker. Provisional defaults
+are shown below; native-image calibration on the complete healthy 256-puzzle
+workload is required before deployment, and the chosen values are recorded in
+receipts.
+
+| Setting | Default | Enforcement |
+|---|---:|---|
+| `LADDER_CANDIDATE_VALIDATION_CPU_SECONDS` | 10 | `RLIMIT_CPU` soft seconds; hard limit one second later |
+| `LADDER_CANDIDATE_SCORE_CPU_SECONDS` | 120 | Same, for scoring workers |
+| `LADDER_CANDIDATE_AS_BYTES` | 34359738368 (32 GiB) | Linux hard `RLIMIT_AS` virtual address-space ceiling |
+| `LADDER_CANDIDATE_RSS_BYTES` | 8589934592 (8 GiB) | Linux worker RSS sampled every 50 ms |
+| `LADDER_CANDIDATE_OUTPUT_BYTES` | 16777216 (16 MiB) | Parent bounds combined stdout/stderr capture |
+
+These settings require positive integers. Local CPU time includes worker imports,
+Python evaluation threads, parsing, and JSON work. Remote GPU inference and HTTP
+waiting do not consume this CPU budget; existing wall and inference deadlines
+still apply. CPU accounting covers the worker process, not a separate per-hook
+budget. BLAS, OpenMP, and NumExpr thread settings are set to one only in the
+worker; Python evaluation concurrency and shared-server settings are retained.
+
+Linux address-space limits bound allocations and mappings, rather than resident
+memory. The RSS watchdog samples the worker process and may observe an overshoot
+between samples. Descendants inherit per-process hard limits, and cleanup kills
+the complete owned group; neither CPU nor RSS is an aggregate process-tree
+budget. This containment is not a comprehensive security sandbox. On non-Linux
+hosts, address-space and RSS enforcement are recorded as unavailable; the
+Linux-only memory regressions must pass in the actual image before recovery.
+
+Confirmed CPU-limit termination (`SIGXCPU`), sampled RSS excess, `MemoryError`,
+output excess, and oversized JSON artifacts produce `rejected_resource_limit`
+with a measured trigger. An unexplained `SIGKILL` remains `rejected_evaluation`.
+The parent reads at most 1 MiB plus an oversize sentinel from any worker result,
+score, or applied-policy JSON artifact. Captured `worker.log` never grows beyond
+the output cap. Limit setup or watchdog setup failures stop the phase explicitly;
+they cannot silently consume all candidate slots.
+
+Each evidence directory contains the requested policy in `request.json`, an
+`applied-policy.json` receipt with actual kernel limits, and a structured outcome.
+Outcomes and rejection rows retain `resource_policy`, `applied_policy`, `resource`
+trigger details, and `usage`: local CPU seconds, latest/peak worker RSS, Linux
+VmPeak (`peak_virtual_bytes`), and observed/captured output bytes. Successful
+workers report usage too. On killed workers, Linux CPU/RSS/VmPeak observations
+are the latest parent samples. Earlier evidence and receipts remain intact.
+
+Scores are staged outside the scored log tree, checked for complete expected
+evaluations and finite metrics, then published as complete candidate folders.
+Worker logs, structured outcomes, and stale/partial rejected scores are retained
+in the adjacent `*-candidate-evidence/` tree; the patched WHALE loop also uses
+`rejected-score-evidence/` for legacy scoring failures. Candidate sources are
+preserved. Cleanup signals only subprocess groups
 started by this invocation; it does not submit or cancel an allocation.
+
+A resumed experiment preserves completed phase receipts and checkpoints, moves
+unfinished search evidence aside, and reruns that search with unchanged incoming
+paths. Each new controller invocation writes its own `provenance-*.json` with
+the current source hashes. Resumed results therefore carry repair provenance;
+old receipts continue to describe the code that originally produced them. The
+resource-policy recovery is explicitly annotated as resuming at cycle 4 harness
+search; it is not represented as an uninterrupted original-evaluator run.
 
 `benchmarks/two-gpu-search.json` records the historical comparison: the same
 three-candidate round, including switching, took 559.71 seconds with server

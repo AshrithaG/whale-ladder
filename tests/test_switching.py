@@ -33,6 +33,28 @@ class PoolTests(unittest.TestCase):
         pool.release(0,True)
         self.assertEqual(pool.snapshot()['completed'],[1,1])
 
+    def test_idle_drain_includes_queued_acquire_during_release_gap(self):
+        pool = BackendPool(['a'], capacity=1)
+        self.assertEqual(pool.acquire(), 0)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            queued = executor.submit(pool.acquire)
+            with pool.condition:
+                self.assertTrue(pool.condition.wait_for(lambda: pool.waiting == 1, timeout=1))
+                # Hold the scheduler precisely between release and the queued
+                # handler reacquiring capacity, without notifying that handler.
+                pool.running[0] = 0
+                pool.completed[0] += 1
+            drained = executor.submit(pool.wait_idle, 2)
+            time.sleep(.05)
+            self.assertFalse(drained.done(), 'A queued request must prevent a false empty drain')
+            pool.enable([0])
+            self.assertEqual(queued.result(timeout=1), 0)
+            self.assertFalse(drained.done())
+            pool.release(0, True)
+            drained.result(timeout=1)
+        self.assertEqual(pool.snapshot()['waiting'], 0)
+        self.assertEqual(pool.snapshot()['completed'], [2])
+
     def test_routing_preserves_requests_and_propagates_errors_without_retry(self):
         received = []
         lock = threading.Lock()
